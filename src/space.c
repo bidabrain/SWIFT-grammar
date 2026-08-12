@@ -2324,9 +2324,15 @@ void space_check_limiter_mapper(void *map_data, int nr_parts,
       error("Particle still woken up! id=%lld wakeup=%d", parts[k].id,
             parts[k].limiter_data.wakeup);
 
-    if (with_timestep_sync && parts[k].limiter_data.to_be_synchronized != 0)
-      error("Synchronized particle not treated! id=%lld synchronized=%d",
-            parts[k].id, parts[k].limiter_data.to_be_synchronized);
+    if (with_timestep_sync && parts[k].limiter_data.to_be_synchronized != 0) {
+      /* TEMP DIAGNOSTIC (limiter/sync leak hunt): record the leaked particle
+       * and clear the flag so the rebuild survives to collect more samples. */
+      message("LEAKSYNC id=%lld time_bin=%d wakeup=%d x=[%e %e %e]",
+              parts[k].id, (int)parts[k].time_bin,
+              (int)parts[k].limiter_data.wakeup, parts[k].x[0], parts[k].x[1],
+              parts[k].x[2]);
+      parts[k].limiter_data.to_be_synchronized = 0;
+    }
 
     if (parts[k].gpart != NULL) {
       if (parts[k].time_bin != parts[k].gpart->time_bin) {
