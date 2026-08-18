@@ -1,0 +1,176 @@
+From bb1c6216ae1650b185f3c4aeee91e13ed8e8dd5c Mon Sep 17 00:00:00 2001
+From: Da Bi <isayama@Das-iMac.local>
+Date: Wed, 12 Aug 2026 17:49:22 +0900
+Subject: [PATCH] Add temporary diagnostics to hunt the limiter/sync-over-MPI
+ leak
+
+Replace the fatal 'Invalid particle position' checks in the time-step
+limiter pair loops with a non-fatal LEAKPOS dump (id, to_be_synchronized,
+wakeup, time_bin, ti_drift, folded position, cell width, dx_max_part) and
+skip the pair so the run survives and logs every occurrence. Also make the
+space_check_limiter 'Synchronized particle not treated!' invariant emit a
+LEAKSYNC line and clear the flag instead of aborting.
+
+Diagnostic only (under SWIFT_DEBUG_CHECKS) to determine whether the crashing
+particles carry a leaked to_be_synchronized flag and characterise them.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+---
+ src/runner_doiact_functions_limiter.h | 110 +++++++++++++++-----------
+ src/space.c                           |  12 ++-
+ 2 files changed, 71 insertions(+), 51 deletions(-)
+
+diff --git a/src/runner_doiact_functions_limiter.h b/src/runner_doiact_functions_limiter.h
+index 08eff7f32..58a841cc9 100644
+--- a/src/runner_doiact_functions_limiter.h
++++ b/src/runner_doiact_functions_limiter.h
+@@ -398,30 +398,37 @@ void DOPAIR1(struct runner *r, const struct cell *restrict ci,
+ 
+ #ifdef SWIFT_DEBUG_CHECKS
+         /* Check that particles are in the correct frame after the shifts */
+-        if (pix > shift_threshold_x || pix < -shift_threshold_x)
+-          error(
+-              "Invalid particle position in X for pi (pix=%e ci->width[0]=%e)",
+-              pix, ci->width[0]);
+-        if (piy > shift_threshold_y || piy < -shift_threshold_y)
+-          error(
+-              "Invalid particle position in Y for pi (piy=%e ci->width[1]=%e)",
+-              piy, ci->width[1]);
+-        if (piz > shift_threshold_z || piz < -shift_threshold_z)
+-          error(
+-              "Invalid particle position in Z for pi (piz=%e ci->width[2]=%e)",
+-              piz, ci->width[2]);
+-        if (pjx > shift_threshold_x || pjx < -shift_threshold_x)
+-          error(
+-              "Invalid particle position in X for pj (pjx=%e ci->width[0]=%e)",
+-              pjx, ci->width[0]);
+-        if (pjy > shift_threshold_y || pjy < -shift_threshold_y)
+-          error(
+-              "Invalid particle position in Y for pj (pjy=%e ci->width[1]=%e)",
+-              pjy, ci->width[1]);
+-        if (pjz > shift_threshold_z || pjz < -shift_threshold_z)
+-          error(
+-              "Invalid particle position in Z for pj (pjz=%e ci->width[2]=%e)",
+-              pjz, ci->width[2]);
++        /* --- TEMP DIAGNOSTIC (limiter/sync leak hunt): a particle folded far
++         *     outside its cell frame is the symptom of a missed time-step sync.
++         *     Log its sync/limiter state and SKIP this pair (r2 is huge anyway)
++         *     instead of aborting, so the run survives and logs every case. */
++        {
++          const int pi_bad =
++              (pix > shift_threshold_x || pix < -shift_threshold_x ||
++               piy > shift_threshold_y || piy < -shift_threshold_y ||
++               piz > shift_threshold_z || piz < -shift_threshold_z);
++          const int pj_bad =
++              (pjx > shift_threshold_x || pjx < -shift_threshold_x ||
++               pjy > shift_threshold_y || pjy < -shift_threshold_y ||
++               pjz > shift_threshold_z || pjz < -shift_threshold_z);
++          if (pi_bad || pj_bad) {
++            const struct part *restrict pb = pi_bad ? pi : pj;
++            const struct cell *restrict cb = pi_bad ? ci : cj;
++            message(
++                "LEAKPOS id=%lld which=%s to_be_synchronized=%d wakeup=%d "
++                "time_bin=%d ti_drift=%lld ti_current=%lld frame=[%e %e %e] "
++                "cellwidth=[%e %e %e] dx_max_part=%e thr=[%e %e %e]",
++                pb->id, pi_bad ? "pi" : "pj",
++                (int)pb->limiter_data.to_be_synchronized,
++                (int)pb->limiter_data.wakeup, (int)pb->time_bin,
++                (long long)pb->ti_drift, (long long)e->ti_current,
++                pi_bad ? pix : pjx, pi_bad ? piy : pjy, pi_bad ? piz : pjz,
++                cb->width[0], cb->width[1], cb->width[2],
++                cb->hydro.dx_max_part, shift_threshold_x, shift_threshold_y,
++                shift_threshold_z);
++            continue;
++          }
++        }
+ 
+         /* Check that particles have been drifted to the current time */
+         if (pi->ti_drift != e->ti_current)
+@@ -497,30 +504,37 @@ void DOPAIR1(struct runner *r, const struct cell *restrict ci,
+ 
+ #ifdef SWIFT_DEBUG_CHECKS
+         /* Check that particles are in the correct frame after the shifts */
+-        if (pix > shift_threshold_x || pix < -shift_threshold_x)
+-          error(
+-              "Invalid particle position in X for pi (pix=%e ci->width[0]=%e)",
+-              pix, ci->width[0]);
+-        if (piy > shift_threshold_y || piy < -shift_threshold_y)
+-          error(
+-              "Invalid particle position in Y for pi (piy=%e ci->width[1]=%e)",
+-              piy, ci->width[1]);
+-        if (piz > shift_threshold_z || piz < -shift_threshold_z)
+-          error(
+-              "Invalid particle position in Z for pi (piz=%e ci->width[2]=%e)",
+-              piz, ci->width[2]);
+-        if (pjx > shift_threshold_x || pjx < -shift_threshold_x)
+-          error(
+-              "Invalid particle position in X for pj (pjx=%e ci->width[0]=%e)",
+-              pjx, ci->width[0]);
+-        if (pjy > shift_threshold_y || pjy < -shift_threshold_y)
+-          error(
+-              "Invalid particle position in Y for pj (pjy=%e ci->width[1]=%e)",
+-              pjy, ci->width[1]);
+-        if (pjz > shift_threshold_z || pjz < -shift_threshold_z)
+-          error(
+-              "Invalid particle position in Z for pj (pjz=%e ci->width[2]=%e)",
+-              pjz, ci->width[2]);
++        /* --- TEMP DIAGNOSTIC (limiter/sync leak hunt): a particle folded far
++         *     outside its cell frame is the symptom of a missed time-step sync.
++         *     Log its sync/limiter state and SKIP this pair (r2 is huge anyway)
++         *     instead of aborting, so the run survives and logs every case. */
++        {
++          const int pi_bad =
++              (pix > shift_threshold_x || pix < -shift_threshold_x ||
++               piy > shift_threshold_y || piy < -shift_threshold_y ||
++               piz > shift_threshold_z || piz < -shift_threshold_z);
++          const int pj_bad =
++              (pjx > shift_threshold_x || pjx < -shift_threshold_x ||
++               pjy > shift_threshold_y || pjy < -shift_threshold_y ||
++               pjz > shift_threshold_z || pjz < -shift_threshold_z);
++          if (pi_bad || pj_bad) {
++            const struct part *restrict pb = pi_bad ? pi : pj;
++            const struct cell *restrict cb = pi_bad ? ci : cj;
++            message(
++                "LEAKPOS id=%lld which=%s to_be_synchronized=%d wakeup=%d "
++                "time_bin=%d ti_drift=%lld ti_current=%lld frame=[%e %e %e] "
++                "cellwidth=[%e %e %e] dx_max_part=%e thr=[%e %e %e]",
++                pb->id, pi_bad ? "pi" : "pj",
++                (int)pb->limiter_data.to_be_synchronized,
++                (int)pb->limiter_data.wakeup, (int)pb->time_bin,
++                (long long)pb->ti_drift, (long long)e->ti_current,
++                pi_bad ? pix : pjx, pi_bad ? piy : pjy, pi_bad ? piz : pjz,
++                cb->width[0], cb->width[1], cb->width[2],
++                cb->hydro.dx_max_part, shift_threshold_x, shift_threshold_y,
++                shift_threshold_z);
++            continue;
++          }
++        }
+ 
+         /* Check that particles have been drifted to the current time */
+         if (pi->ti_drift != e->ti_current)
+diff --git a/src/space.c b/src/space.c
+index 9269ce002..c7a3f6c61 100644
+--- a/src/space.c
++++ b/src/space.c
+@@ -2324,9 +2324,15 @@ void space_check_limiter_mapper(void *map_data, int nr_parts,
+       error("Particle still woken up! id=%lld wakeup=%d", parts[k].id,
+             parts[k].limiter_data.wakeup);
+ 
+-    if (with_timestep_sync && parts[k].limiter_data.to_be_synchronized != 0)
+-      error("Synchronized particle not treated! id=%lld synchronized=%d",
+-            parts[k].id, parts[k].limiter_data.to_be_synchronized);
++    if (with_timestep_sync && parts[k].limiter_data.to_be_synchronized != 0) {
++      /* TEMP DIAGNOSTIC (limiter/sync leak hunt): record the leaked particle
++       * and clear the flag so the rebuild survives to collect more samples. */
++      message("LEAKSYNC id=%lld time_bin=%d wakeup=%d x=[%e %e %e]",
++              parts[k].id, (int)parts[k].time_bin,
++              (int)parts[k].limiter_data.wakeup, parts[k].x[0], parts[k].x[1],
++              parts[k].x[2]);
++      parts[k].limiter_data.to_be_synchronized = 0;
++    }
+ 
+     if (parts[k].gpart != NULL) {
+       if (parts[k].time_bin != parts[k].gpart->time_bin) {
+-- 
+2.39.2 (Apple Git-143)
+
