@@ -1,0 +1,152 @@
+diff --git a/src/cell.c b/src/cell.c
+index 8a228fe53..cfdcfab18 100644
+--- a/src/cell.c
++++ b/src/cell.c
+@@ -57,6 +57,53 @@
+ /* Global variables. */
+ int cell_next_tag = 0;
+ 
++/* Retired hydro.sort buffers. cell_malloc_hydro_sorts() grows a cell's sort
++ * array by allocating a new one; it must NOT swift_free() the old buffer in
++ * place because lock-free readers with no sort dependency (the time-step
++ * limiter; ghost-driven subset reads) may still be walking it -> use-after-free.
++ * Instead the old buffers are retired here and freed together at the next
++ * rebuild barrier (cell_free_retired_hydro_sorts, from space_rebuild), where no
++ * task is reading sort arrays. */
++static void **cell_retired_sorts = NULL;
++static size_t cell_retired_sorts_count = 0;
++static size_t cell_retired_sorts_size = 0;
++static pthread_mutex_t cell_retired_sorts_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/**
++ * @brief Retire a grown-over hydro.sort buffer for deferred freeing.
++ *
++ * Thread-safe: called concurrently from runner threads under each cell's
++ * extra_sort_lock. The buffer is freed later by cell_free_retired_hydro_sorts().
++ *
++ * @param ptr The old hydro.sort buffer (may be NULL).
++ */
++void cell_retire_hydro_sort(void *ptr) {
++  if (ptr == NULL) return;
++  pthread_mutex_lock(&cell_retired_sorts_lock);
++  if (cell_retired_sorts_count == cell_retired_sorts_size) {
++    cell_retired_sorts_size =
++        cell_retired_sorts_size ? 2 * cell_retired_sorts_size : 1024;
++    cell_retired_sorts = (void **)realloc(
++        cell_retired_sorts, cell_retired_sorts_size * sizeof(void *));
++    if (cell_retired_sorts == NULL)
++      error("Failed to grow the retired hydro.sort list.");
++  }
++  cell_retired_sorts[cell_retired_sorts_count++] = ptr;
++  pthread_mutex_unlock(&cell_retired_sorts_lock);
++}
++
++/**
++ * @brief Free all retired hydro.sort buffers.
++ *
++ * Must be called only at a rebuild barrier (single-threaded, no task reading
++ * sort arrays), e.g. from space_rebuild().
++ */
++void cell_free_retired_hydro_sorts(void) {
++  for (size_t i = 0; i < cell_retired_sorts_count; i++)
++    swift_free("hydro.sort", cell_retired_sorts[i]);
++  cell_retired_sorts_count = 0;
++}
++
+ /** List of cell pairs for sub-cell recursion. For any sid, the entries in
+  * this array contain the number of sub-cell pairs and the indices and sid
+  * of the sub-cell pairs themselves. */
+diff --git a/src/cell.h b/src/cell.h
+index 994af6332..7d5f0fd83 100644
+--- a/src/cell.h
++++ b/src/cell.h
+@@ -1373,6 +1373,10 @@ __attribute__((always_inline)) INLINE static void cell_ensure_tagged(
+ #endif  // WITH_MPI
+ }
+ 
++/* Deferred reclamation of grown-over hydro.sort buffers (see cell.c). */
++void cell_retire_hydro_sort(void *ptr);
++void cell_free_retired_hydro_sorts(void);
++
+ /**
+  * @brief Allocate hydro sort memory for cell.
+  *
+@@ -1419,8 +1423,12 @@ __attribute__((always_inline)) INLINE static void cell_malloc_hydro_sorts(
+       }
+     }
+ 
+-    /* Swap the pointers */
+-    swift_free("hydro.sort", c->hydro.sort);
++    /* Swap the pointers. Do NOT swift_free() the old buffer in place: lock-free
++       readers with no sort dependency (the time-step limiter; ghost-driven
++       subset reads) may still be walking it, which is a use-after-free. Retire
++       it and free it at the next rebuild barrier (cell_free_retired_hydro_sorts,
++       called from space_rebuild) where no task reads sorts. */
++    cell_retire_hydro_sort(c->hydro.sort);
+     c->hydro.sort = new_array;
+ 
+   } else {
+diff --git a/src/runner_doiact_functions_stars.h b/src/runner_doiact_functions_stars.h
+index 872f6b6c8..8fef8587d 100644
+--- a/src/runner_doiact_functions_stars.h
++++ b/src/runner_doiact_functions_stars.h
+@@ -1195,17 +1195,20 @@ void DOPAIR1_SUBSET_BRANCH_STARS(struct runner *r,
+   const int flipped = runner_flip[sid];
+   sid = sortlistID[sid];
+ 
+-  /* Let's first lock the cell */
++  /* Lock the cell. We must keep this lock held for as long as we read the
++     sort array below: this subset interaction is driven from the stars ghost,
++     i.e. *outside* the task graph, so there is no scheduler dependency
++     preventing another runner thread from concurrently (re-)sorting cj. A
++     concurrent runner_do_hydro_sort() -> cell_malloc_hydro_sorts() can
++     swift_free() and swap cj->hydro.sort while we walk it, giving out-of-range
++     sort indices and an out-of-bounds read. Holding extra_sort_lock across the
++     read serialises us against that free/realloc. */
+   lock_lock(&cj->hydro.extra_sort_lock);
+ 
+   const int is_sorted =
+       (cj->hydro.sorted & (1 << sid)) &&
+       (cj->hydro.dx_max_sort_old <= space_maxreldx * cj->dmin);
+ 
+-  /* Unlock if it wasn't sorted as we will not use the sort array */
+-  if (lock_unlock(&cj->hydro.extra_sort_lock) != 0)
+-    error("Impossible to unlock cell!");
+-
+ #if defined(SWIFT_USE_NAIVE_INTERACTIONS)
+   const int force_naive = 1;
+ #else
+@@ -1214,9 +1217,17 @@ void DOPAIR1_SUBSET_BRANCH_STARS(struct runner *r,
+ 
+   /* Can we use the sorted interactions or do we default to naive? */
+   if (force_naive || !is_sorted) {
++    /* The naive interaction does not touch cj->hydro.sort, so we can release
++       the lock before doing the (potentially long) interaction. */
++    if (lock_unlock(&cj->hydro.extra_sort_lock) != 0)
++      error("Impossible to unlock cell!");
+     DOPAIR1_SUBSET_STARS_NAIVE(r, ci, sparts_i, ind, scount, cj, shift);
+   } else {
++    /* The sorted interaction reads cj->hydro.sort: keep the lock held across
++       it, then release. */
+     DOPAIR1_SUBSET_STARS(r, ci, sparts_i, ind, scount, cj, sid, flipped, shift);
++    if (lock_unlock(&cj->hydro.extra_sort_lock) != 0)
++      error("Impossible to unlock cell!");
+   }
+ }
+ 
+diff --git a/src/space_rebuild.c b/src/space_rebuild.c
+index 87b39778e..0635289cc 100644
+--- a/src/space_rebuild.c
++++ b/src/space_rebuild.c
+@@ -50,6 +50,11 @@ void space_rebuild(struct space *s, int repartitioned, int verbose) {
+ 
+   const ticks tic = getticks();
+ 
++  /* We are at a barrier (no tasks reading sort arrays): free the hydro.sort
++     buffers that cell_malloc_hydro_sorts() retired instead of freeing in place
++     to avoid a use-after-free against lock-free readers. */
++  cell_free_retired_hydro_sorts();
++
+ /* Be verbose about this. */
+ #ifdef SWIFT_DEBUG_CHECKS
+   if (s->e->nodeID == 0 || verbose) message("(re)building space");

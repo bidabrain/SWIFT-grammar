@@ -50,6 +50,11 @@ void space_rebuild(struct space *s, int repartitioned, int verbose) {
 
   const ticks tic = getticks();
 
+  /* We are at a barrier (no tasks reading sort arrays): free the hydro.sort
+     buffers that cell_malloc_hydro_sorts() retired instead of freeing in place
+     to avoid a use-after-free against lock-free readers. */
+  cell_free_retired_hydro_sorts();
+
 /* Be verbose about this. */
 #ifdef SWIFT_DEBUG_CHECKS
   if (s->e->nodeID == 0 || verbose) message("(re)building space");

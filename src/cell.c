@@ -57,6 +57,53 @@
 /* Global variables. */
 int cell_next_tag = 0;
 
+/* Retired hydro.sort buffers. cell_malloc_hydro_sorts() grows a cell's sort
+ * array by allocating a new one; it must NOT swift_free() the old buffer in
+ * place because lock-free readers with no sort dependency (the time-step
+ * limiter; ghost-driven subset reads) may still be walking it -> use-after-free.
+ * Instead the old buffers are retired here and freed together at the next
+ * rebuild barrier (cell_free_retired_hydro_sorts, from space_rebuild), where no
+ * task is reading sort arrays. */
+static void **cell_retired_sorts = NULL;
+static size_t cell_retired_sorts_count = 0;
+static size_t cell_retired_sorts_size = 0;
+static pthread_mutex_t cell_retired_sorts_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Retire a grown-over hydro.sort buffer for deferred freeing.
+ *
+ * Thread-safe: called concurrently from runner threads under each cell's
+ * extra_sort_lock. The buffer is freed later by cell_free_retired_hydro_sorts().
+ *
+ * @param ptr The old hydro.sort buffer (may be NULL).
+ */
+void cell_retire_hydro_sort(void *ptr) {
+  if (ptr == NULL) return;
+  pthread_mutex_lock(&cell_retired_sorts_lock);
+  if (cell_retired_sorts_count == cell_retired_sorts_size) {
+    cell_retired_sorts_size =
+        cell_retired_sorts_size ? 2 * cell_retired_sorts_size : 1024;
+    cell_retired_sorts = (void **)realloc(
+        cell_retired_sorts, cell_retired_sorts_size * sizeof(void *));
+    if (cell_retired_sorts == NULL)
+      error("Failed to grow the retired hydro.sort list.");
+  }
+  cell_retired_sorts[cell_retired_sorts_count++] = ptr;
+  pthread_mutex_unlock(&cell_retired_sorts_lock);
+}
+
+/**
+ * @brief Free all retired hydro.sort buffers.
+ *
+ * Must be called only at a rebuild barrier (single-threaded, no task reading
+ * sort arrays), e.g. from space_rebuild().
+ */
+void cell_free_retired_hydro_sorts(void) {
+  for (size_t i = 0; i < cell_retired_sorts_count; i++)
+    swift_free("hydro.sort", cell_retired_sorts[i]);
+  cell_retired_sorts_count = 0;
+}
+
 /** List of cell pairs for sub-cell recursion. For any sid, the entries in
  * this array contain the number of sub-cell pairs and the indices and sid
  * of the sub-cell pairs themselves. */

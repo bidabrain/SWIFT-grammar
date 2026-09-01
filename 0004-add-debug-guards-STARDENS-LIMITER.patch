@@ -1,0 +1,110 @@
+--- a/src/runner_doiact_functions_stars.h
++++ b/src/runner_doiact_functions_stars.h
+@@ -844,6 +844,10 @@
+ 
+         /* Get a pointer to the jth particle. */
+         struct part *restrict pj = &parts_j[sort_j[pjd].i];
++        if (cj->hydro.parts == NULL || sort_j[pjd].i < 0 || sort_j[pjd].i >= count_j) {
++          message("STARDENS-BAD id=%lld pjd=%d count_j=%d sort_i=%d sid=%d sorted=%x sort_alloc=%x dx_old=%e dmin=%e", (long long)spi->id, pjd, count_j, (int)sort_j[pjd].i, sid, (unsigned int)cj->hydro.sorted, (unsigned int)cj->hydro.sort_allocated, (double)cj->hydro.dx_max_sort_old, (double)cj->dmin);
++          continue;
++        }
+ 
+         /* Skip inhibited particles. */
+         if (part_is_inhibited(pj, e)) continue;
+@@ -907,6 +911,10 @@
+ 
+         /* Get a pointer to the jth particle. */
+         struct part *restrict pj = &parts_j[sort_j[pjd].i];
++        if (cj->hydro.parts == NULL || sort_j[pjd].i < 0 || sort_j[pjd].i >= count_j) {
++          message("STARDENS-BAD id=%lld pjd=%d count_j=%d sort_i=%d sid=%d sorted=%x sort_alloc=%x dx_old=%e dmin=%e", (long long)spi->id, pjd, count_j, (int)sort_j[pjd].i, sid, (unsigned int)cj->hydro.sorted, (unsigned int)cj->hydro.sort_allocated, (double)cj->hydro.dx_max_sort_old, (double)cj->dmin);
++          continue;
++        }
+ 
+         /* Skip inhibited particles. */
+         if (part_is_inhibited(pj, e)) continue;
+--- a/src/runner_doiact_functions_limiter.h
++++ b/src/runner_doiact_functions_limiter.h
+@@ -352,6 +352,20 @@
+          pid >= 0 && sort_i[pid].d + hi_max + dx_max > dj_min; pid--) {
+ 
+       /* Get a hold of the ith part in ci. */
++      if (parts_i == NULL || sort_i[pid].i < 0 ||
++          sort_i[pid].i >= count_i) {
++        message("LIMITER-BAD side=i pid=%d count_i=%d "
++          "sort_idx=%d sid=%d ci_foreign=%d cj_foreign=%d "
++          "sorted=%x sort_alloc=%x dx_old=%e dmin=%e",
++          pid, count_i, (int)sort_i[pid].i, sid,
++          (ci->nodeID != e->nodeID),
++          (cj->nodeID != e->nodeID),
++          (unsigned int)ci->hydro.sorted,
++          (unsigned int)ci->hydro.sort_allocated,
++          (double)ci->hydro.dx_max_sort_old,
++          (double)ci->dmin);
++        continue;
++      }
+       struct part *restrict pi = &parts_i[sort_i[pid].i];
+       const char depth_i = pi->depth_h;
+       const float hi = pi->h;
+@@ -382,6 +396,20 @@
+       for (int pjd = 0; pjd < count_j && sort_j[pjd].d < di; pjd++) {
+ 
+         /* Recover pj */
++        if (parts_j == NULL || sort_j[pjd].i < 0 ||
++            sort_j[pjd].i >= count_j) {
++          message("LIMITER-BAD side=j pjd=%d count_j=%d "
++            "sort_idx=%d sid=%d ci_foreign=%d cj_foreign=%d "
++            "sorted=%x sort_alloc=%x dx_old=%e dmin=%e",
++            pjd, count_j, (int)sort_j[pjd].i, sid,
++            (ci->nodeID != e->nodeID),
++            (cj->nodeID != e->nodeID),
++            (unsigned int)cj->hydro.sorted,
++            (unsigned int)cj->hydro.sort_allocated,
++            (double)cj->hydro.dx_max_sort_old,
++            (double)cj->dmin);
++          continue;
++        }
+         struct part *pj = &parts_j[sort_j[pjd].i];
+ 
+         /* Skip inhibited particles. */
+@@ -458,6 +486,20 @@
+          pjd++) {
+ 
+       /* Get a hold of the jth part in cj. */
++      if (parts_j == NULL || sort_j[pjd].i < 0 ||
++          sort_j[pjd].i >= count_j) {
++        message("LIMITER-BAD side=j pjd=%d count_j=%d "
++          "sort_idx=%d sid=%d ci_foreign=%d cj_foreign=%d "
++          "sorted=%x sort_alloc=%x dx_old=%e dmin=%e",
++          pjd, count_j, (int)sort_j[pjd].i, sid,
++          (ci->nodeID != e->nodeID),
++          (cj->nodeID != e->nodeID),
++          (unsigned int)cj->hydro.sorted,
++          (unsigned int)cj->hydro.sort_allocated,
++          (double)cj->hydro.dx_max_sort_old,
++          (double)cj->dmin);
++        continue;
++      }
+       struct part *pj = &parts_j[sort_j[pjd].i];
+       const char depth_j = pj->depth_h;
+       const float hj = pj->h;
+@@ -488,6 +530,20 @@
+       for (int pid = count_i - 1; pid >= 0 && sort_i[pid].d > dj; pid--) {
+ 
+         /* Recover pi */
++        if (parts_i == NULL || sort_i[pid].i < 0 ||
++            sort_i[pid].i >= count_i) {
++          message("LIMITER-BAD side=i pid=%d count_i=%d "
++            "sort_idx=%d sid=%d ci_foreign=%d cj_foreign=%d "
++            "sorted=%x sort_alloc=%x dx_old=%e dmin=%e",
++            pid, count_i, (int)sort_i[pid].i, sid,
++            (ci->nodeID != e->nodeID),
++            (cj->nodeID != e->nodeID),
++            (unsigned int)ci->hydro.sorted,
++            (unsigned int)ci->hydro.sort_allocated,
++            (double)ci->hydro.dx_max_sort_old,
++            (double)ci->dmin);
++          continue;
++        }
+         struct part *pi = &parts_i[sort_i[pid].i];
+ 
+         /* Skip inhibited particles. */
