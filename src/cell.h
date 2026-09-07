@@ -1373,6 +1373,10 @@ __attribute__((always_inline)) INLINE static void cell_ensure_tagged(
 #endif  // WITH_MPI
 }
 
+/* Deferred reclamation of grown-over hydro.sort buffers (see cell.c). */
+void cell_retire_hydro_sort(void *ptr);
+void cell_free_retired_hydro_sorts(void);
+
 /**
  * @brief Allocate hydro sort memory for cell.
  *
@@ -1419,8 +1423,12 @@ __attribute__((always_inline)) INLINE static void cell_malloc_hydro_sorts(
       }
     }
 
-    /* Swap the pointers */
-    swift_free("hydro.sort", c->hydro.sort);
+    /* Swap the pointers. Do NOT swift_free() the old buffer in place: lock-free
+       readers with no sort dependency (the time-step limiter; ghost-driven
+       subset reads) may still be walking it, which is a use-after-free. Retire
+       it and free it at the next rebuild barrier (cell_free_retired_hydro_sorts,
+       called from space_rebuild) where no task reads sorts. */
+    cell_retire_hydro_sort(c->hydro.sort);
     c->hydro.sort = new_array;
 
   } else {
