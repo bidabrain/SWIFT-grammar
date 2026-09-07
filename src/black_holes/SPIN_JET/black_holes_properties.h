@@ -133,6 +133,14 @@ struct black_holes_props {
   /*! Eddington fraction threshold for recording */
   float f_Edd_recording;
 
+  /*! Are we using the LRD ("Little Red Dot") confined-feedback phase? */
+  int use_lrd_confinement;
+
+  /*! Critical value of the raw, unsuppressed Bondi-based Eddington ratio above
+   * which the BH enters the LRD confined-feedback phase (feedback is gated
+   * off). Single-parameter criterion (Schleicher, priv. comm.). */
+  float lrd_eddington_fraction;
+
   /*! Switch for the Booth, Schaye 2009 model */
   int with_boost_factor;
 
@@ -529,6 +537,27 @@ INLINE static void black_holes_props_init(struct black_holes_props *bp,
       parser_get_param_float(params, "SPINJETAGN:max_eddington_fraction");
   bp->f_Edd_recording = parser_get_param_float(
       params, "SPINJETAGN:eddington_fraction_for_recording");
+
+  /* LRD ("Little Red Dot") confined-feedback phase -------- */
+
+  /* Off by default so that existing runs are unaffected. When on, AGN feedback
+   * is confined (not coupled to the gas) whenever the raw, unsuppressed
+   * Bondi-based Eddington ratio exceeds lrd_eddington_fraction. */
+  bp->use_lrd_confinement =
+      parser_get_opt_param_int(params, "SPINJETAGN:use_lrd_confinement", 0);
+  if (bp->use_lrd_confinement) {
+    bp->lrd_eddington_fraction = parser_get_param_float(
+        params, "SPINJETAGN:lrd_confinement_eddington_fraction");
+    if (bp->lrd_eddington_fraction <= 0.f)
+      error(
+          "SPINJETAGN:lrd_confinement_eddington_fraction must be strictly "
+          "positive (got %g).",
+          bp->lrd_eddington_fraction);
+  } else {
+    /* Large sentinel: the threshold is never reached when confinement is off
+     * (the gate is additionally guarded by use_lrd_confinement). */
+    bp->lrd_eddington_fraction = 1.e30f;
+  }
 
   /*  Booth Schaye (2009) Parameters */
   bp->with_boost_factor =

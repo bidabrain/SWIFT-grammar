@@ -873,7 +873,9 @@ SPINJETAGN:
   boost_n_h_star_cm3:                 0.1        # Normalization of the power law for the Booth Schaye 2009 model in cgs (cm^-3).
   max_eddington_fraction:             1.         # Maximal allowed accretion rate in units of the Eddington rate.
   eddington_fraction_for_recording:   0.1        # Record the last time BHs reached an Eddington ratio above this threshold.
-  use_nibbling:                       1          # Continuously transfer small amounts of mass from all gas neighbours to a black hole [1] or stochastically swallow whole gas particles [0]? 
+  use_lrd_confinement:                0          # (Optional) Enable the LRD ("Little Red Dot") confined-feedback phase [1] or not [0, default]. When on, AGN feedback is gated off while the raw (unsuppressed) Bondi-based Eddington ratio exceeds lrd_confinement_eddington_fraction.
+  lrd_confinement_eddington_fraction: 100.       # Critical unsuppressed Bondi-based Eddington ratio above which the BH enters the LRD confined-feedback phase. Only used (and required) if use_lrd_confinement is 1.
+  use_nibbling:                       1          # Continuously transfer small amounts of mass from all gas neighbours to a black hole [1] or stochastically swallow whole gas particles [0]?
   min_gas_mass_for_nibbling_Msun:     9e5        # Minimum mass for a gas particle to be nibbled from [M_Sun]. Only used if use_nibbling is 1.
   coupling_efficiency:                0.15       # Fraction of the radiated energy that couples to the gas in feedback events.
   AGN_heating_temperature_model:      Constant   # How AGN jet velocities are calculated. If 'Constant', a single value is used. If 'BlackHoleMass', then an empirical relation between halo mass and black hole mass is used to calculate jet velocities. 'HaloMass' is currently not supported.

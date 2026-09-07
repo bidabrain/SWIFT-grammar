@@ -189,7 +189,7 @@ INLINE static void black_holes_write_particles(const struct bpart *bparts,
                                                const int with_cosmology) {
 
   /* Say how much we want to write */
-  *num_fields = 63;
+  *num_fields = 66;
 
   /* List what we want to write */
   list[0] = io_make_output_field_convert_bpart(
@@ -595,6 +595,26 @@ INLINE static void black_holes_write_particles(const struct bpart *bparts,
       "The accretion efficiencies of black holes. These are used to convert "
       "from the large-scale accretion rate onto an accretion disc (the raw "
       "Bondi-like accretion rate) to the accretion rate onto the BH itself.");
+
+  list[63] = io_make_output_field(
+      "LRDConfinedFlags", CHAR, 1, UNIT_CONV_NO_UNITS, 0.f, bparts, in_lrd_phase,
+      "Whether the black hole is currently in the LRD (Little Red Dot) "
+      "confined-feedback phase (1) or not (0). In this phase the AGN feedback "
+      "is assumed to be confined and does not couple to the surrounding gas.");
+
+  list[64] = io_make_output_field(
+      "LRDConfinedMasses", FLOAT, 1, UNIT_CONV_MASS, 0.f, bparts,
+      lrd_confined_mass,
+      "Cumulative subgrid mass grown by the black hole while in the LRD "
+      "(Little Red Dot) confined-feedback phase.");
+
+  list[65] = io_make_output_field(
+      "UnsuppressedEddingtonFractions", FLOAT, 1, UNIT_CONV_NO_UNITS, 0.f,
+      bparts, eddington_fraction_unsuppressed,
+      "Raw, unsuppressed Bondi-based accretion rate in units of the Eddington "
+      "rate, before the max_eddington_fraction cap and before accretion-"
+      "efficiency suppression. This is the quantity that governs the LRD "
+      "confined-feedback transition.");
 
 #ifdef DEBUG_INTERACTIONS_BLACK_HOLES
 

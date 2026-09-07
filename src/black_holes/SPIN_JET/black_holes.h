@@ -156,6 +156,9 @@ __attribute__((always_inline)) INLINE static void black_holes_first_init_bpart(
   bp->accretion_disk_angle = 0.01f;
   bp->accretion_mode = BH_thin_disc;
   bp->eddington_fraction = 0.01f;
+  bp->eddington_fraction_unsuppressed = 0.01f;
+  bp->in_lrd_phase = 0;
+  bp->lrd_confined_mass = 0.f;
   bp->jet_reservoir = 0.f;
   bp->total_jet_energy = 0.f;
   bp->wind_efficiency = 0.f;
@@ -638,6 +641,11 @@ __attribute__((always_inline)) INLINE static void black_holes_swallow_bpart(
   /* Update the jet reservoir */
   bpi->jet_reservoir += bpj->jet_reservoir;
 
+  /* Accumulate the mass grown in the LRD confined-feedback phase. The
+   * in_lrd_phase flag itself is recomputed every step, so it does not need to
+   * be merged. */
+  bpi->lrd_confined_mass += bpj->lrd_confined_mass;
+
   /* Add up all the BH seeds */
   bpi->cumulative_number_seeds += bpj->cumulative_number_seeds;
 
@@ -856,6 +864,17 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
 
   /* Limit the accretion rate to a fraction of the Eddington rate */
   bp->eddington_fraction = accr_rate / Eddington_rate;
+
+  /* Raw, unsuppressed Bondi-based Eddington ratio, captured *before* the
+   * Eddington-rate cap and *before* the accretion-efficiency suppression are
+   * applied below. This is the quantity that governs the transition into the
+   * LRD ("Little Red Dot") confined-feedback phase, so that the criterion is
+   * decoupled from the max_eddington_fraction cap. */
+  const double eddington_fraction_unsuppressed = bp->eddington_fraction;
+
+  /* Store it for output (threshold calibration / post-processing). */
+  bp->eddington_fraction_unsuppressed = eddington_fraction_unsuppressed;
+
   accr_rate = min(accr_rate, props->f_Edd * Eddington_rate);
 
   /* Include the effects of the accretion efficiency */
@@ -873,6 +892,21 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
   bp->radiative_efficiency = black_hole_radiative_efficiency(bp, props);
   bp->jet_efficiency = black_hole_jet_efficiency(bp, props);
   bp->wind_efficiency = black_hole_wind_efficiency(bp, props);
+
+  /* Determine whether the BH is in the LRD ("Little Red Dot") confined-
+   * feedback phase. The transition is governed purely by the raw, unsuppressed
+   * Bondi-based Eddington ratio exceeding a critical value (single-parameter
+   * criterion). While in this phase, the AGN feedback energy is assumed to be
+   * gravitationally confined and re-radiated as soft photospheric emission that
+   * does not couple to the galaxy-scale gas; the coupled-feedback reservoirs
+   * are therefore not fed (see below), and the BH grows without self-
+   * regulation. */
+  if (props->use_lrd_confinement &&
+      eddington_fraction_unsuppressed > props->lrd_eddington_fraction) {
+    bp->in_lrd_phase = 1;
+  } else {
+    bp->in_lrd_phase = 0;
+  }
 
   /* Define feedback-related quantities that we will update and need later on */
   double luminosity = 0.;
@@ -1024,17 +1058,27 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
                    black_hole_jet_efficiency(bp, props) -
                    black_hole_wind_efficiency(bp, props));
 
-  /* Increase the reservoir */
-  bp->jet_reservoir += delta_m_0 * c * c * props->eps_f_jet *
-                       black_hole_jet_efficiency(bp, props);
-  bp->energy_reservoir +=
-      delta_m_0 * c * c *
-      (props->epsilon_f * black_hole_radiative_efficiency(bp, props) +
-       black_hole_wind_efficiency(bp, props));
+  /* Increase the reservoir. During the LRD confined-feedback phase this is
+   * skipped: the feedback energy is assumed to be confined and radiated away
+   * as soft photospheric emission that does not couple to the galaxy-scale
+   * gas, so it is neither stored nor injected. */
+  if (!bp->in_lrd_phase) {
+    bp->jet_reservoir += delta_m_0 * c * c * props->eps_f_jet *
+                         black_hole_jet_efficiency(bp, props);
+    bp->energy_reservoir +=
+        delta_m_0 * c * c *
+        (props->epsilon_f * black_hole_radiative_efficiency(bp, props) +
+         black_hole_wind_efficiency(bp, props));
+  }
 
   /* Update the masses */
   bp->subgrid_mass += delta_m_real;
   bp->total_accreted_mass += delta_m_real;
+
+  /* Track the mass grown while AGN feedback is confined (LRD phase). This is a
+   * diagnostic for how much of the BH's growth happened without self-
+   * regulation. */
+  if (bp->in_lrd_phase) bp->lrd_confined_mass += delta_m_real;
 
   /* Update the total accreted masses split by accretion mode of the BHs */
   bp->accreted_mass_by_mode[bp->accretion_mode] += delta_m_real;
@@ -1641,6 +1685,9 @@ INLINE static void black_holes_create_from_gas(
   bp->accretion_disk_angle = 0.01f;
   bp->accretion_mode = BH_thin_disc;
   bp->eddington_fraction = 0.01f;
+  bp->eddington_fraction_unsuppressed = 0.01f;
+  bp->in_lrd_phase = 0;
+  bp->lrd_confined_mass = 0.f;
   bp->jet_reservoir = 0.f;
   bp->total_jet_energy = 0.f;
   bp->wind_efficiency = 0.f;

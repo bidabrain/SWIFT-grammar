@@ -215,6 +215,23 @@ struct bpart {
   /*! Eddington fraction */
   float eddington_fraction;
 
+  /*! Raw, unsuppressed Bondi-based Eddington ratio (before the Eddington-rate
+   * cap and before accretion-efficiency suppression). This is the quantity
+   * that governs the transition into the LRD confined-feedback phase, exposed
+   * for post-processing/threshold calibration. */
+  float eddington_fraction_unsuppressed;
+
+  /*! Whether the BH is currently in the LRD ("Little Red Dot") confined-
+   * feedback phase (1) or not (0). During this phase the (super-Eddington)
+   * AGN feedback is assumed to be gravitationally confined and re-radiated as
+   * soft photospheric emission, so it does not couple to the galaxy-scale
+   * gas. */
+  char in_lrd_phase;
+
+  /*! Cumulative subgrid mass grown by the BH while in the LRD confined-
+   * feedback phase (diagnostic for the confined-growth prediction). */
+  float lrd_confined_mass;
+
   /*! BH dimensionless spin */
   float spin;
 
