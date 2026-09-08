@@ -1,0 +1,604 @@
+From 3bb0aad827f4c36d1a9ab5d9c0bfd21c47ab7cea Mon Sep 17 00:00:00 2001
+From: Da Bi <isayama@Das-iMac.local>
+Date: Tue, 8 Sep 2026 16:20:22 +0900
+Subject: [PATCH] Fix use-after-free / data race on cell->stars.sort
+ (on-the-fly stars sort lock + deferred free)
+
+The stars feedback DOSUB path (runner_dosub_pair_stars_feedback) triggers
+runner_do_stars_sort() on the fly, outside the task graph. Unlike the hydro
+equivalent (runner_do_hydro_sort, called with lock=1), the stars sort took no
+lock, so two runner threads could concurrently (re)sort the same cell and race
+inside cell_malloc_stars_sorts() -> one swift_free()s c->stars.sort while the
+other memcpy/walks it -> SIGSEGV in runner_do_stars_sort.
+
+Mirror the hydro.sort fix for stars.sort:
+- Add a per-cell stars.extra_sort_lock (+ init in space.c/space_regrid.c,
+  destroy in space_recycle.c).
+- Give runner_do_stars_sort() a `lock` parameter with the same double-checked
+  locking as the hydro sort; pass lock=1 from the four on-the-fly feedback
+  call sites, lock=0 from the scheduled stars_sort task and runner_do_all_stars_sort
+  (already serialised by task dependencies).
+- Defer freeing grown-over stars.sort buffers (cell_retire_stars_sort /
+  cell_free_retired_stars_sorts, freed at the rebuild barrier from
+  space_rebuild) so concurrent feedback readers cannot use-after-free.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014QEuoaGLV1UoeayXpF6SvQ
+---
+ eagle_spin_jet.yml                  | 236 ++++++++++++++++++++++++++++
+ src/cell.c                          |  49 ++++++
+ src/cell.h                          |   9 +-
+ src/cell_stars.h                    |   4 +
+ src/runner.h                        |   2 +-
+ src/runner_doiact_functions_stars.h |  12 +-
+ src/runner_main.c                   |   3 +-
+ src/runner_sort.c                   |  35 ++++-
+ src/space.c                         |   1 +
+ src/space_rebuild.c                 |   6 +-
+ src/space_recycle.c                 |   2 +
+ src/space_regrid.c                  |   2 +
+ 12 files changed, 347 insertions(+), 14 deletions(-)
+ create mode 100644 eagle_spin_jet.yml
+
+diff --git a/eagle_spin_jet.yml b/eagle_spin_jet.yml
+new file mode 100644
+index 000000000..1c7935fb6
+--- /dev/null
++++ b/eagle_spin_jet.yml
+@@ -0,0 +1,236 @@
++PS2020Cooling:
++  H_reion_eV_p_H: 2.0
++  H_reion_z: 7.5
++  He_reion_eV_p_H: 2.0
++  He_reion_z_centre: 3.5
++  He_reion_z_sigma: 0.5
++  delta_logTEOS_subgrid_properties: 0.3
++  dir_name: ./UV_dust1_CR1_G1_shield1.hdf5
++  rapid_cooling_threshold: 0.333333
++Cosmology:
++  Omega_b: 0.047143
++  Omega_cdm: 0.240702
++  Omega_lambda: 0.712155
++  a_begin: 0.004975124378109453
++  a_end: 1.0
++  h: 0.6933
++SPINJETAGN:
++  subgrid_seed_mass_Msun:             1e5        # Black hole subgrid mass at creation time in solar masses.
++  use_subgrid_mass_from_ics:          1          # (Optional) Use subgrid masses specified in ICs [1, default], or initialise them to particle masses [0]?
++  with_subgrid_mass_check:            1          # (Optional) Verify that initial black hole subgrid masses are positive [1, default]. Only used if use_subgrid_mass_from_ics is 1.
++  use_multi_phase_bondi:              0          # Compute Bondi rates per neighbour particle [1] or for the smoothed ambient gas around the black hole [0]?
++  use_subgrid_gas_properties:         1          # Use subgrid density [1] or dynamical density [0] to calculate BH accretion rates?
++  use_krumholz:                       1          # Use Krumholz et al. (2006) [1] or standard Bondi-Hoyle-Lyttleton formula [0] for black hole accretion rates? Only used if multi_phase_bondi is 0.
++  with_krumholz_vorticity:            0          # Include the vorticity term in Krumholz et al. formula? Only used if use_multi_phase_bondi is 0.
++  with_angmom_limiter:                0          # Are we applying the Rosas-Guevara (2015) viscous time-scale reduction term?
++  viscous_alpha:                      1e6        # Normalisation constant of the viscous time-scale in the accretion reduction term. Only used if with_angmom_limiter is 1.
++  with_boost_factor:                  0          # Are we using the model from Booth, Schaye (2009)?
++  boost_alpha:                        1.         # Lowest value for the accretion effeciency for the Booth, Schaye 2009 accretion model.
++  boost_beta:                         2.         # Slope of the power law for the Booth, Schaye 2009 model, set beta to zero for constant alpha models.
++  boost_n_h_star_cm3:                 0.1        # Normalization of the power law for the Booth Schaye 2009 model in cgs (cm^-3).
++  max_eddington_fraction:             1.         # Maximal allowed accretion rate in units of the Eddington rate.
++  eddington_fraction_for_recording:   0.1        # Record the last time BHs reached an Eddington ratio above this threshold.
++  use_nibbling:                       1          # Continuously transfer small amounts of mass from all gas neighbours to a black hole [1] or stochastically swallow whole gas particles [0]? 
++  min_gas_mass_for_nibbling_Msun:     1.1e6        # Minimum mass for a gas particle to be nibbled from [M_Sun]. Only used if use_nibbling is 1.
++  coupling_efficiency:                0.15       # Fraction of the radiated energy that couples to the gas in feedback events.
++  AGN_delta_T_model:      Constant   # How AGN jet velocities are calculated. If 'Constant', a single value is used. If 'BlackHoleMass', then an empirical relation between halo mass and black hole mass is used to calculate jet velocities. 'HaloMass' is currently not supported.
++  AGN_delta_T_K:                      3.16228e8  # Change in temperature to apply to the gas particle in an AGN feedback event in Kelvin, if 'AGN_heating_temperature_model' is 'Constant'.
++  delta_T_xi:                         1.         # The numerical multiplier by which the heating temperature formula is scaled, if 'AGN_heating_temperature_model' is 'Local'. If a value of 1 is used, the formulas are used as derived, i.e. they are not rescaled.
++  delta_T_min_K:                      1e8        # The minimal heating temperature in Kelvin. This is used if 'AGN_heating_temperature_model' is 'Local'.
++  delta_T_max_K:                      1e11       # The maximal heating temperature in Kelvin. This is used if 'AGN_heating_temperature_model' is 'Local'.
++  AGN_num_ngb_to_heat:                1.         # Target number of gas neighbours to heat in an AGN feedback event.
++  with_potential_correction:          1          # Subtract BH's own contribution to the potential of neighbours when determining repositioning targets.
++  max_reposition_mass_Msun:           2e8        # Maximal BH mass considered for BH repositioning in solar masses.
++  max_reposition_distance_ratio:      3.0        # Maximal distance a BH can be repositioned, in units of the softening length.
++  with_reposition_velocity_threshold: 0          # Should we only reposition to particles that move slowly w.r.t. the black hole?
++  max_reposition_velocity_ratio:      0.25       # Maximal velocity offset of a particle to reposition a BH to, in units of the ambient sound speed of the BH. Only meaningful if with_reposition_velocity_ratio is 1.
++  min_reposition_velocity_threshold_km_p_s: -1.0 # Minimal value of the velocity threshold for repositioning [km/s], set to < 0 for no effect. Only meaningful if with_reposition_velocity_ratio is 1.
++  set_reposition_speed:               0          # Should we reposition black holes with (at most) a prescribed speed towards the potential minimum?
++  reposition_coefficient_upsilon:     0.001      # Repositioning speed normalisation [km/s/M_sun]. Only meaningful if set_reposition_speed is 1.
++  reposition_exponent_xi:             1.0        # (Optional) Scaling of repositioning velocity with BH subgrid mass (default: 1.0, linear). Only meaningful if set_reposition_speed is 1.
++  threshold_major_merger:             0.333      # Mass ratio threshold to consider a BH merger as 'major'
++  threshold_minor_merger:             0.1        # Mass ratio threshold to consider a BH merger as 'minor'
++  merger_threshold_type:              DynamicalEscapeVelocity   # Type of velocity threshold for BH mergers (CircularVelocity as in EAGLE, EscapeVelocity, or DynamicalEscapeVelocity)
++  merger_max_distance_ratio:          3.0        # Maximal distance over which two BHs can merge, in units of the softening length.
++  AGN_use_deterministic_feedback:     1          # Deterministic (1) or stochastic (0) AGN feedback model
++  AGN_feedback_model:                 Isotropic  # AGN feedback model (Isotropic or MinimumDistance)
++  minimum_timestep_yr:                1000.0     # Minimum time-step of black-hole particles
++  include_jets:                       1          # Global switch whether to include jet feedback [1] or not [0].
++  turn_off_radiative_feedback:        0          # Global switch whether to turn off radiative (thermal) feedback [1] or not [0]. This should only be used if 'include_jets' is set to 1, since we want feedback in some form or another.
++  alpha_acc:                          0.2        # Viscous alpha of the subgrid accretion disks. Likely to be within the 0.1-0.3 range. The main effect is that it sets the transition accretion rate between the thin and thick disk, as dot(m) = 0.2 * alpha^2.
++  mdot_crit_ADAF:                     0.01       # The transition normalized accretion rate (Eddington ratio) at which the disc goes from thick (low accretion rates) to thin (high accretion rates). The feedback also changes from kinetic jets to thermal isotropic, respectively.
++  seed_spin:                          0.01       # The (randomly-directed) black hole spin assigned to BHs when they are seeded. Should be strictly between 0 and 1.
++  AGN_jet_velocity_model:             Constant   # How AGN jet velocities are calculated. If 'Constant', a single value is used. If 'BlackHoleMass', then an empirical relation between halo mass and black hole mass is used to calculate jet velocities. 'HaloMass' is currently not supported. 
++  v_jet_km_p_s:                       3160.      # Jet velocity to use if 'AGN_jet_velocity_model' is 'Constant'. Units are km/s.
++  v_jet_BH_mass_scaling_reference_mass_Msun: 1e9 # The reference mass used in the relation between halo mass and BH mass used to calculate jet velocities. Only used if 'AGN_jet_velocity_model' is 'BlackHoleMass'.
++  v_jet_BH_mass_scaling_slope:        0.5        # The slope of the relation between halo mass and BH mass used to calculate jet velocities. Only used if 'AGN_jet_velocity_model' is 'BlackHoleMass'.
++  v_jet_min_km_p_s:                   500        # The minimal jet velocity. This is used if 'AGN_jet_velocity_model' is 'BlackHoleMass', 'MassLoading' or 'Local'.
++  v_jet_max_km_p_s:                   1e4        # The maximal jet velocity. This is used if 'AGN_jet_velocity_model' is 'BlackHoleMass', 'MassLoading' or 'Local'.
++  opening_angle_in_degrees:           7.5        # The half-opening angle of the jet in degrees. Should use values < 15 unless for tests.
++  N_jet:                              2          # Target number of particles to kick as part of a single jet feedback event. Should be a multiple of 2 to ensure approximate momentum conservation (we always kick particles in pairs, one from each 'side' of the BH, relative to the spin vector).
++  AGN_jet_feedback_model:             MinimumDistance # Which particles to kick from the black hole smoothing kernels. Should be 'SpinAxis', 'MinimumDistance', 'MaximumDistance' or 'MinimumDensity'
++  eps_f_jet:                          1.         # Coupling efficiency for jet feedback. No reason to expect this to be less than 1.
++  fix_jet_efficiency:                 0          # Global switch whether to fix jet efficiency to a particular value [1], or use a spin-dependant formula [0].
++  jet_efficiency:                     0.1        # The constant jet efficiency used if 'fix_jet_efficiency' is set to 1.
++  fix_jet_direction:                  0          # Global switch whether to fix the jet direction to be along the z-axis, instead of along the spin vector.
++  accretion_efficiency_mode:          Variable   # How the accretion efficiencies are calculated for the thick accretion disc. If 'Constant', the value of 'accretion_efficiency_thick' will be used. If 'Variable', the accretion efficiency will scale with Eddington ratio.
++  accretion_efficiency_thick:         0.01       # The accretion efficiency (suppression factor of the accretion rate) to use in the thick disc (ADAF), to represent the effects of subgrid ADIOS winds that take away most of the mass flowing through the accretion disc.
++  accretion_efficiency_slim:          1          # The constant accretion efficiency to use in the slim disc, at super-Eddington rates.
++  ADIOS_s:                            0.5        # The exponent of the scaling between accretion efficiency and transition radius of the accretion disc, used if 'accretion_efficiency_mode' is 'Variable'.
++  ADIOS_R_in:                         1e4        # The normalisation (the value) of the transition radius of the accretion disc at the critical Eddington ratio (0.01), used if 'accretion_efficiency_mode' is 'Variable'.
++  fix_radiative_efficiency:           0          # Global switch whether to fix the radiative efficiency to a particular value [1], or use a spin-dependant formula [0]. 
++  radiative_efficiency:               0.1        # The constant jet efficiency used if 'fix_radiative_efficiency' is set to 1. Otherwise, this value is used to define the Eddington accretion rate.
++  TD_region:                          B          # How to treat the subgrid accretion disk if it is thin, according to the Shakura & Sunyaev (1973) model. If set to B, region b will be used. If set to C, region c will be used.
++  include_GRMHD_spindown:             1          # Whether to include high jet spindown rates from GRMHD simulations [1], or use an analytical formula that assumes extraction of energy from the rotational mass/energy of the BH.
++  delta_ADAF:                         0.2        # Electron heating parameter, which controls the strength of radiative feedback in thick disks. Should be between 0.1 and 0.5. This parameter is only used if turn_off_secondary_feedback is set to 0.
++  include_slim_disk:                  1          # Global switch whether to include super-Eddington accretion, modeled as the slim disk. If set to 0, disks will be considered thin even at very large accretion rates.
++  use_jets_in_thin_disc:              1          # Whether to use jets alongside radiation in the thin disc at moderate Eddington ratios.
++  use_ADIOS_winds:                    1          # Whether to include ADIOS winds in the thick disc as thermal isotropic feedback (same channel as thin disc quasar feedback, but with a different efficiency). 
++  slim_disc_wind_factor:              1          # The relative efficiency of slim disc winds at super-Eddington rates. If '1', full winds will be used, while '0' will lead to no winds. Any value in between those can also be used. The wind is implemented in the thermal isotropic feedback channel.
++EAGLEChemistry:
++  init_abundance_Carbon: 0.0
++  init_abundance_Helium: 0.248
++  init_abundance_Hydrogen: 0.752
++  init_abundance_Iron: 0.0
++  init_abundance_Magnesium: 0.0
++  init_abundance_Neon: 0.0
++  init_abundance_Nitrogen: 0.0
++  init_abundance_Oxygen: 0.0
++  init_abundance_Silicon: 0.0
++  init_abundance_metal: 0.0
++EAGLEEntropyFloor:
++  Cool_density_threshold_H_p_cm3: 1e-5
++  Cool_gamma_effective: 1.0
++  Cool_over_density_threshold: 10.0
++  Cool_temperature_norm_K: 10.0
++  Jeans_density_threshold_H_p_cm3: 1e-4
++  Jeans_gamma_effective: 1.3333333
++  Jeans_over_density_threshold: 10.0
++  Jeans_temperature_norm_K: 800
++EAGLEFeedback:
++  AGB_ejecta_velocity_km_p_s: 10.0
++  IMF_max_mass_Msun: 100.0
++  IMF_min_mass_Msun: 0.1
++  SNII_delta_T_K: 3502786.824128497
++  SNII_energy_erg: 1.0e51
++  SNII_energy_fraction_Z_0: 0.00127
++  SNII_energy_fraction_delta_E_n: 6.0
++  SNII_energy_fraction_function: EAGLE
++  SNII_energy_fraction_max: 9.089848042896422
++  SNII_energy_fraction_min: 0.09242937594567849
++  SNII_energy_fraction_n_0_H_p_cm3: 0.5896299071594127
++  SNII_energy_fraction_n_Z: 1.0
++  SNII_energy_fraction_n_n: 1.0
++  SNII_energy_fraction_use_birth_density: 0
++  SNII_energy_fraction_use_birth_metallicity: 0
++  SNII_feedback_model: MinimumDistance
++  SNII_max_mass_Msun: 100.0
++  SNII_min_mass_Msun: 8.0
++  SNII_sampled_delay: 1
++  SNII_yield_factor_Carbon: 0.5
++  SNII_yield_factor_Helium: 1.0
++  SNII_yield_factor_Hydrogen: 1.0
++  SNII_yield_factor_Iron: 0.5
++  SNII_yield_factor_Magnesium: 2.0
++  SNII_yield_factor_Neon: 1.0
++  SNII_yield_factor_Nitrogen: 1.0
++  SNII_yield_factor_Oxygen: 1.0
++  SNII_yield_factor_Silicon: 1.0
++  SNIa_DTD: Exponential
++  SNIa_DTD_delay_Gyr: 0.04
++  SNIa_DTD_exp_norm_p_Msun: 0.002
++  SNIa_DTD_exp_timescale_Gyr: 2.0
++  SNIa_energy_erg: 1.0e51
++  filename: ./yieldtables/
++  stellar_evolution_age_cut_Gyr: 0.1
++  stellar_evolution_sampling_rate: 10
++  use_AGB_enrichment: 1
++  use_SNII_enrichment: 1
++  use_SNII_feedback: 1
++  use_SNIa_enrichment: 1
++  use_SNIa_feedback: 1
++EAGLEStarFormation:
++  EOS_entropy_margin_dex: 0.3
++  KS_exponent: 1.4
++  KS_high_density_exponent: 2.0
++  KS_high_density_threshold_H_p_cm3: 1e8
++  KS_normalisation: 0.0001515
++  SF_model: PressureLaw
++  SF_threshold: Subgrid
++  min_over_density: 100.0
++  threshold_Z0: 0.002
++  threshold_max_density_H_p_cm3: 10.0
++  threshold_norm_H_p_cm3: 0.1
++  threshold_number_density_H_p_cm3: 10
++  threshold_slope: -0.64
++  threshold_temperature1_K: 1000
++  threshold_temperature2_K: 31622
++FOF:
++  basename: fof_output
++  black_hole_seed_halo_mass_Msun: 1.0e10
++  delta_time: 1.00751
++  linking_length_ratio: 0.2
++  min_group_size: 32
++  scale_factor_first: 0.05
++  seed_black_holes_enabled: 1
++  linking_types:   [0, 1, 0, 0, 0, 0, 0]       # Use DM as the primary FOF linking type
++  attaching_types: [1, 0, 0, 0, 1, 1, 0]       # Use gas, stars and black holes as FOF attachable types
++Gravity:
++  MAC: adaptive
++  comoving_DM_softening: 0.0014  #fix at z<1.8
++  comoving_baryon_softening: 0.0014
++  epsilon_fmm: 0.001
++  eta: 0.025
++  max_physical_DM_softening: 0.0005
++  max_physical_baryon_softening: 0.0005
++  mesh_side_length: 256
++  theta_cr: 0.7
++  use_tree_below_softening: 0
++InitialConditions:
++  cleanup_h_factors: 0
++  cleanup_smoothing_lengths: 1
++  cleanup_velocity_factors: 0
++  file_name: ../ics/ics_swift.hdf5
++  generate_gas_in_ics: 1
++  periodic: 1
++  remap_ids: 0
++InternalUnitSystem:
++  UnitCurrent_in_cgs: 1
++  UnitLength_in_cgs: 3.08567758e24
++  UnitMass_in_cgs: 1.98841e43
++  UnitTemp_in_cgs: 1
++  UnitVelocity_in_cgs: 1e5
++MetaData:
++  run_name: 'eagle'
++Restarts:
++  delta_hours: 0.5 
++  onexit: 1
++SPH:
++  CFL_condition: 0.2
++  h_max: 0.5
++  h_min_ratio: 0.01
++  initial_temperature: 268.7
++  minimal_temperature: 100.0
++  particle_splitting: 1
++  particle_splitting_mass_threshold: 0.00087
++  resolution_eta: 1.2348
++Scheduler:
++  cell_split_size: 200
++  max_top_level_cells: 16
++Snapshots:
++  basename: snap
++  compression: 4
++  output_list: ./output_list.txt
++  output_list_on: 1
++  recording_triggers_part: [0., 0.]   # Recording starts 100M and 10M years before a snapshot
++  recording_triggers_bpart: [0., 0.]  # Recording starts 100M and 10M years before a snapshot 
++Stars:
++  h_tolerance: 7e-3
++  luminosity_filename: ./photometry
++  resolution_eta: 1.1642
++Statistics:
++  delta_time: 1.01
++  scale_factor_first: 0.01
++TimeIntegration:
++  dt_max: 1e-2
++  dt_min: 1e-10
+diff --git a/src/cell.c b/src/cell.c
+index cfdcfab18..8ecf2e9f4 100644
+--- a/src/cell.c
++++ b/src/cell.c
+@@ -104,6 +104,55 @@ void cell_free_retired_hydro_sorts(void) {
+   cell_retired_sorts_count = 0;
+ }
+ 
++/* Retired stars.sort buffers. Same rationale as the hydro.sort list above:
++ * cell_malloc_stars_sorts() grows a cell's stars sort array by allocating a new
++ * one; it must NOT swift_free() the old buffer in place because a concurrent
++ * feedback reader (walking c->stars.sort with only the extra_sort_lock, or an
++ * on-the-fly re-sort on a shared cell) may still be using it -> use-after-free.
++ * Retire here and free at the next rebuild barrier (cell_free_retired_stars_
++ * sorts, from space_rebuild). */
++static void **cell_retired_stars_sorts = NULL;
++static size_t cell_retired_stars_sorts_count = 0;
++static size_t cell_retired_stars_sorts_size = 0;
++static pthread_mutex_t cell_retired_stars_sorts_lock =
++    PTHREAD_MUTEX_INITIALIZER;
++
++/**
++ * @brief Retire a grown-over stars.sort buffer for deferred freeing.
++ *
++ * Thread-safe: called concurrently from runner threads under each cell's
++ * stars.extra_sort_lock. Freed later by cell_free_retired_stars_sorts().
++ *
++ * @param ptr The old stars.sort buffer (may be NULL).
++ */
++void cell_retire_stars_sort(void *ptr) {
++  if (ptr == NULL) return;
++  pthread_mutex_lock(&cell_retired_stars_sorts_lock);
++  if (cell_retired_stars_sorts_count == cell_retired_stars_sorts_size) {
++    cell_retired_stars_sorts_size =
++        cell_retired_stars_sorts_size ? 2 * cell_retired_stars_sorts_size : 1024;
++    cell_retired_stars_sorts = (void **)realloc(
++        cell_retired_stars_sorts,
++        cell_retired_stars_sorts_size * sizeof(void *));
++    if (cell_retired_stars_sorts == NULL)
++      error("Failed to grow the retired stars.sort list.");
++  }
++  cell_retired_stars_sorts[cell_retired_stars_sorts_count++] = ptr;
++  pthread_mutex_unlock(&cell_retired_stars_sorts_lock);
++}
++
++/**
++ * @brief Free all retired stars.sort buffers.
++ *
++ * Must be called only at a rebuild barrier (single-threaded, no task reading
++ * sort arrays), e.g. from space_rebuild().
++ */
++void cell_free_retired_stars_sorts(void) {
++  for (size_t i = 0; i < cell_retired_stars_sorts_count; i++)
++    swift_free("stars.sort", cell_retired_stars_sorts[i]);
++  cell_retired_stars_sorts_count = 0;
++}
++
+ /** List of cell pairs for sub-cell recursion. For any sid, the entries in
+  * this array contain the number of sub-cell pairs and the indices and sid
+  * of the sub-cell pairs themselves. */
+diff --git a/src/cell.h b/src/cell.h
+index 7d5f0fd83..6f617b32f 100644
+--- a/src/cell.h
++++ b/src/cell.h
+@@ -1376,6 +1376,8 @@ __attribute__((always_inline)) INLINE static void cell_ensure_tagged(
+ /* Deferred reclamation of grown-over hydro.sort buffers (see cell.c). */
+ void cell_retire_hydro_sort(void *ptr);
+ void cell_free_retired_hydro_sorts(void);
++void cell_retire_stars_sort(void *ptr);
++void cell_free_retired_stars_sorts(void);
+ 
+ /**
+  * @brief Allocate hydro sort memory for cell.
+@@ -1545,8 +1547,11 @@ __attribute__((always_inline)) INLINE static void cell_malloc_stars_sorts(
+       }
+     }
+ 
+-    /* Swap the pointers */
+-    swift_free("stars.sort", c->stars.sort);
++    /* Swap the pointers. Do NOT swift_free() the old buffer in place: a
++       concurrent feedback reader or on-the-fly re-sort on a shared cell may
++       still be walking it (use-after-free). Retire it and free at the next
++       rebuild barrier (cell_free_retired_stars_sorts, from space_rebuild). */
++    cell_retire_stars_sort(c->stars.sort);
+     c->stars.sort = new_array;
+ 
+   } else {
+diff --git a/src/cell_stars.h b/src/cell_stars.h
+index 343ae912a..c2f439f2a 100644
+--- a/src/cell_stars.h
++++ b/src/cell_stars.h
+@@ -91,6 +91,10 @@ struct cell_stars {
+     /*! Pointer for the sorted indices. */
+     struct sort_entry *sort;
+ 
++    /*! Spin lock serialising on-the-fly (re)sorts of the stars sort array and
++     *  its deferred buffer reclamation (see runner_do_stars_sort). */
++    swift_lock_type extra_sort_lock;
++
+     /*! Last (integer) time the cell's spart were drifted forward in time. */
+     integertime_t ti_old_part;
+ 
+diff --git a/src/runner.h b/src/runner.h
+index 7da75f230..973b73d3f 100644
+--- a/src/runner.h
++++ b/src/runner.h
+@@ -106,7 +106,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flag,
+                           const int cleanup, const int lock,
+                           const int rt_requests_sort, const int clock);
+ void runner_do_stars_sort(struct runner *r, struct cell *c, int flag,
+-                          int cleanup, int clock);
++                          int cleanup, const int lock, int clock);
+ void runner_do_all_hydro_sort(struct runner *r, struct cell *c);
+ void runner_do_all_stars_sort(struct runner *r, struct cell *c);
+ void runner_do_drift_part(struct runner *r, struct cell *c, int timer);
+diff --git a/src/runner_doiact_functions_stars.h b/src/runner_doiact_functions_stars.h
+index 8fef8587d..e075f707a 100644
+--- a/src/runner_doiact_functions_stars.h
++++ b/src/runner_doiact_functions_stars.h
+@@ -1419,7 +1419,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+     if (do_ci) {
+       if (!(ci->stars.sorted & (1 << sid)) ||
+           ci->stars.dx_max_sort_old > ci->dmin * space_maxreldx) {
+-        runner_do_stars_sort(r, ci, (1 << sid), 0, 0);
++        runner_do_stars_sort(r, ci, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+       }
+       if (!(cj->hydro.sorted & (1 << sid)) ||
+           cj->hydro.dx_max_sort_old > cj->dmin * space_maxreldx) {
+@@ -1435,7 +1436,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+       }
+       if (!(cj->stars.sorted & (1 << sid)) ||
+           cj->stars.dx_max_sort_old > cj->dmin * space_maxreldx) {
+-        runner_do_stars_sort(r, cj, (1 << sid), 0, 0);
++        runner_do_stars_sort(r, cj, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+       }
+     }
+ 
+@@ -1466,7 +1468,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+       if (do_ci) {
+         if (!(ci->stars.sorted & (1 << sid)) ||
+             ci->stars.dx_max_sort_old > ci->dmin * space_maxreldx) {
+-          runner_do_stars_sort(r, ci, (1 << sid), 0, 0);
++          runner_do_stars_sort(r, ci, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+         }
+         if (!(cj->hydro.sorted & (1 << sid)) ||
+             cj->hydro.dx_max_sort_old > cj->dmin * space_maxreldx) {
+@@ -1484,7 +1487,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+         }
+         if (!(cj->stars.sorted & (1 << sid)) ||
+             cj->stars.dx_max_sort_old > cj->dmin * space_maxreldx) {
+-          runner_do_stars_sort(r, cj, (1 << sid), 0, 0);
++          runner_do_stars_sort(r, cj, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+         }
+       }
+ 
+diff --git a/src/runner_main.c b/src/runner_main.c
+index 0aaeede7e..16ce34e08 100644
+--- a/src/runner_main.c
++++ b/src/runner_main.c
+@@ -358,7 +358,8 @@ void *runner_main(void *data) {
+           /* Cleanup only if any of the indices went stale. */
+           runner_do_stars_sort(
+               r, ci, t->flags,
+-              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin, 1);
++              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin,
++              /*lock=*/0, /*clock=*/1);
+           /* Reset the sort flags as our work here is done. */
+           t->flags = 0;
+           break;
+diff --git a/src/runner_sort.c b/src/runner_sort.c
+index 8760764fd..542e801ee 100644
+--- a/src/runner_sort.c
++++ b/src/runner_sort.c
+@@ -475,7 +475,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flags,
+  *      for recursive calls.
+  */
+ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+-                          int cleanup, int clock) {
++                          int cleanup, const int lock, int clock) {
+ 
+   struct sort_entry *fingers[8];
+   const int count = c->stars.count;
+@@ -488,6 +488,24 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   if (c->hydro.super == NULL) error("Task called above the super level!!!");
+ #endif
+ 
++  /* Should we lock the cell? This is needed when the sort is triggered on the
++   * fly from the stars feedback interactions (outside the task graph), where
++   * another runner thread may concurrently (re)sort the same cell. The
++   * scheduled stars_sort task does not need it (dependencies serialise it). */
++  if (lock) lock_lock(&c->stars.extra_sort_lock);
++
++  /* Now that we acquired the lock, verify whether it has not been already
++   * sorted while we were waiting. */
++  if (lock) {
++    if ((c->stars.sorted & flags) &&
++        c->stars.dx_max_sort_old <= c->dmin * space_maxreldx) {
++      /* Another thread did the sort while we were waiting. Release and exit. */
++      if (lock_unlock(&c->stars.extra_sort_lock) != 0)
++        error("Impossible to unlock the cell!");
++      return;
++    }
++  }
++
+   /* We need to do the local sorts plus whatever was requested further up. */
+   flags |= c->stars.do_sort;
+   if (cleanup) {
+@@ -495,7 +513,12 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   } else {
+     flags &= ~c->stars.sorted;
+   }
+-  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) return;
++  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) {
++    /* Unlock before returning */
++    if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
++      error("Impossible to unlock the cell!");
++    return;
++  }
+ 
+   /* Check that the particles have been moved to the current time */
+   if (flags && !cell_are_spart_drifted(c, r->e)) {
+@@ -536,7 +559,7 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+           const int cleanup_prog =
+               cleanup && (c->progeny[k]->stars.dx_max_sort_old >
+                           space_maxreldx * c->progeny[k]->dmin);
+-          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, 0);
++          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, lock, 0);
+           dx_max_sort = max(dx_max_sort, c->progeny[k]->stars.dx_max_sort);
+           dx_max_sort_old =
+               max(dx_max_sort_old, c->progeny[k]->stars.dx_max_sort_old);
+@@ -688,6 +711,10 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   cell_clear_flag(c, cell_flag_do_stars_sub_sort);
+   c->stars.requires_sorts = 0;
+ 
++  /* Make sure we unlock if necessary */
++  if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
++
+   if (clock) TIMER_TOC(timer_do_stars_sort);
+ }
+ 
+@@ -759,7 +786,7 @@ void runner_do_all_stars_sort(struct runner *r, struct cell *c) {
+   if (c->hydro.super == c) {
+ 
+     /* Sort everything */
+-    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*timer=*/0);
++    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*lock=*/0, /*timer=*/0);
+ 
+   } else {
+ 
+diff --git a/src/space.c b/src/space.c
+index 9269ce002..3ba147550 100644
+--- a/src/space.c
++++ b/src/space.c
+@@ -530,6 +530,7 @@ void space_getcells(struct space *s, int nr_cells, struct cell **cells,
+     cells[j]->tpid = tpid;
+     if (lock_init(&cells[j]->hydro.lock) != 0 ||
+         lock_init(&cells[j]->hydro.extra_sort_lock) != 0 ||
++        lock_init(&cells[j]->stars.extra_sort_lock) != 0 ||
+         lock_init(&cells[j]->grav.plock) != 0 ||
+         lock_init(&cells[j]->grav.mlock) != 0 ||
+         lock_init(&cells[j]->stars.lock) != 0 ||
+diff --git a/src/space_rebuild.c b/src/space_rebuild.c
+index 0635289cc..2dd812db5 100644
+--- a/src/space_rebuild.c
++++ b/src/space_rebuild.c
+@@ -51,9 +51,11 @@ void space_rebuild(struct space *s, int repartitioned, int verbose) {
+   const ticks tic = getticks();
+ 
+   /* We are at a barrier (no tasks reading sort arrays): free the hydro.sort
+-     buffers that cell_malloc_hydro_sorts() retired instead of freeing in place
+-     to avoid a use-after-free against lock-free readers. */
++     and stars.sort buffers that cell_malloc_{hydro,stars}_sorts() retired
++     instead of freeing in place to avoid a use-after-free against lock-free
++     readers. */
+   cell_free_retired_hydro_sorts();
++  cell_free_retired_stars_sorts();
+ 
+ /* Be verbose about this. */
+ #ifdef SWIFT_DEBUG_CHECKS
+diff --git a/src/space_recycle.c b/src/space_recycle.c
+index 9edd9a7cb..6e6a6e066 100644
+--- a/src/space_recycle.c
++++ b/src/space_recycle.c
+@@ -261,6 +261,7 @@ void space_recycle(struct space *s, struct cell *c) {
+       lock_destroy(&c->grav.mlock) != 0 || lock_destroy(&c->stars.lock) != 0 ||
+       lock_destroy(&c->sinks.lock) != 0 ||
+       lock_destroy(&c->hydro.extra_sort_lock) != 0 ||
++      lock_destroy(&c->stars.extra_sort_lock) != 0 ||
+       lock_destroy(&c->sinks.sink_formation_lock) != 0 ||
+       lock_destroy(&c->black_holes.lock) != 0 ||
+       lock_destroy(&c->grav.star_formation_lock) != 0 ||
+@@ -312,6 +313,7 @@ void space_recycle_list(struct space *s, struct cell *cell_list_begin,
+         lock_destroy(&c->stars.lock) != 0 ||
+         lock_destroy(&c->sinks.lock) != 0 ||
+         lock_destroy(&c->hydro.extra_sort_lock) != 0 ||
++        lock_destroy(&c->stars.extra_sort_lock) != 0 ||
+         lock_destroy(&c->sinks.sink_formation_lock) != 0 ||
+         lock_destroy(&c->black_holes.lock) != 0 ||
+         lock_destroy(&c->stars.star_formation_lock) != 0 ||
+diff --git a/src/space_regrid.c b/src/space_regrid.c
+index 3138050df..6b45cc12b 100644
+--- a/src/space_regrid.c
++++ b/src/space_regrid.c
+@@ -280,6 +280,8 @@ void space_regrid(struct space *s, int verbose) {
+         error("Failed to init spinlock for hydro.");
+       if (lock_init(&s->cells_top[k].hydro.extra_sort_lock) != 0)
+         error("Failed to init spinlock for hydro extra sort.");
++      if (lock_init(&s->cells_top[k].stars.extra_sort_lock) != 0)
++        error("Failed to init spinlock for stars extra sort.");
+       if (lock_init(&s->cells_top[k].grav.plock) != 0)
+         error("Failed to init spinlock for gravity.");
+       if (lock_init(&s->cells_top[k].grav.mlock) != 0)
+-- 
+2.39.2 (Apple Git-143)
+
