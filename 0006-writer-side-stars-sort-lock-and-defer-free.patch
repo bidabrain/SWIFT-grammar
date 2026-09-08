@@ -1,0 +1,317 @@
+diff --git a/src/cell.c b/src/cell.c
+index cfdcfab18..8ecf2e9f4 100644
+--- a/src/cell.c
++++ b/src/cell.c
+@@ -104,6 +104,55 @@ void cell_free_retired_hydro_sorts(void) {
+   cell_retired_sorts_count = 0;
+ }
+ 
++/* Retired stars.sort buffers. Same rationale as the hydro.sort list above:
++ * cell_malloc_stars_sorts() grows a cell's stars sort array by allocating a new
++ * one; it must NOT swift_free() the old buffer in place because a concurrent
++ * feedback reader (walking c->stars.sort with only the extra_sort_lock, or an
++ * on-the-fly re-sort on a shared cell) may still be using it -> use-after-free.
++ * Retire here and free at the next rebuild barrier (cell_free_retired_stars_
++ * sorts, from space_rebuild). */
++static void **cell_retired_stars_sorts = NULL;
++static size_t cell_retired_stars_sorts_count = 0;
++static size_t cell_retired_stars_sorts_size = 0;
++static pthread_mutex_t cell_retired_stars_sorts_lock =
++    PTHREAD_MUTEX_INITIALIZER;
++
++/**
++ * @brief Retire a grown-over stars.sort buffer for deferred freeing.
++ *
++ * Thread-safe: called concurrently from runner threads under each cell's
++ * stars.extra_sort_lock. Freed later by cell_free_retired_stars_sorts().
++ *
++ * @param ptr The old stars.sort buffer (may be NULL).
++ */
++void cell_retire_stars_sort(void *ptr) {
++  if (ptr == NULL) return;
++  pthread_mutex_lock(&cell_retired_stars_sorts_lock);
++  if (cell_retired_stars_sorts_count == cell_retired_stars_sorts_size) {
++    cell_retired_stars_sorts_size =
++        cell_retired_stars_sorts_size ? 2 * cell_retired_stars_sorts_size : 1024;
++    cell_retired_stars_sorts = (void **)realloc(
++        cell_retired_stars_sorts,
++        cell_retired_stars_sorts_size * sizeof(void *));
++    if (cell_retired_stars_sorts == NULL)
++      error("Failed to grow the retired stars.sort list.");
++  }
++  cell_retired_stars_sorts[cell_retired_stars_sorts_count++] = ptr;
++  pthread_mutex_unlock(&cell_retired_stars_sorts_lock);
++}
++
++/**
++ * @brief Free all retired stars.sort buffers.
++ *
++ * Must be called only at a rebuild barrier (single-threaded, no task reading
++ * sort arrays), e.g. from space_rebuild().
++ */
++void cell_free_retired_stars_sorts(void) {
++  for (size_t i = 0; i < cell_retired_stars_sorts_count; i++)
++    swift_free("stars.sort", cell_retired_stars_sorts[i]);
++  cell_retired_stars_sorts_count = 0;
++}
++
+ /** List of cell pairs for sub-cell recursion. For any sid, the entries in
+  * this array contain the number of sub-cell pairs and the indices and sid
+  * of the sub-cell pairs themselves. */
+diff --git a/src/cell.h b/src/cell.h
+index 7d5f0fd83..6f617b32f 100644
+--- a/src/cell.h
++++ b/src/cell.h
+@@ -1376,6 +1376,8 @@ __attribute__((always_inline)) INLINE static void cell_ensure_tagged(
+ /* Deferred reclamation of grown-over hydro.sort buffers (see cell.c). */
+ void cell_retire_hydro_sort(void *ptr);
+ void cell_free_retired_hydro_sorts(void);
++void cell_retire_stars_sort(void *ptr);
++void cell_free_retired_stars_sorts(void);
+ 
+ /**
+  * @brief Allocate hydro sort memory for cell.
+@@ -1545,8 +1547,11 @@ __attribute__((always_inline)) INLINE static void cell_malloc_stars_sorts(
+       }
+     }
+ 
+-    /* Swap the pointers */
+-    swift_free("stars.sort", c->stars.sort);
++    /* Swap the pointers. Do NOT swift_free() the old buffer in place: a
++       concurrent feedback reader or on-the-fly re-sort on a shared cell may
++       still be walking it (use-after-free). Retire it and free at the next
++       rebuild barrier (cell_free_retired_stars_sorts, from space_rebuild). */
++    cell_retire_stars_sort(c->stars.sort);
+     c->stars.sort = new_array;
+ 
+   } else {
+diff --git a/src/cell_stars.h b/src/cell_stars.h
+index 343ae912a..c2f439f2a 100644
+--- a/src/cell_stars.h
++++ b/src/cell_stars.h
+@@ -91,6 +91,10 @@ struct cell_stars {
+     /*! Pointer for the sorted indices. */
+     struct sort_entry *sort;
+ 
++    /*! Spin lock serialising on-the-fly (re)sorts of the stars sort array and
++     *  its deferred buffer reclamation (see runner_do_stars_sort). */
++    swift_lock_type extra_sort_lock;
++
+     /*! Last (integer) time the cell's spart were drifted forward in time. */
+     integertime_t ti_old_part;
+ 
+diff --git a/src/runner.h b/src/runner.h
+index 7da75f230..973b73d3f 100644
+--- a/src/runner.h
++++ b/src/runner.h
+@@ -106,7 +106,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flag,
+                           const int cleanup, const int lock,
+                           const int rt_requests_sort, const int clock);
+ void runner_do_stars_sort(struct runner *r, struct cell *c, int flag,
+-                          int cleanup, int clock);
++                          int cleanup, const int lock, int clock);
+ void runner_do_all_hydro_sort(struct runner *r, struct cell *c);
+ void runner_do_all_stars_sort(struct runner *r, struct cell *c);
+ void runner_do_drift_part(struct runner *r, struct cell *c, int timer);
+diff --git a/src/runner_doiact_functions_stars.h b/src/runner_doiact_functions_stars.h
+index 8fef8587d..e075f707a 100644
+--- a/src/runner_doiact_functions_stars.h
++++ b/src/runner_doiact_functions_stars.h
+@@ -1419,7 +1419,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+     if (do_ci) {
+       if (!(ci->stars.sorted & (1 << sid)) ||
+           ci->stars.dx_max_sort_old > ci->dmin * space_maxreldx) {
+-        runner_do_stars_sort(r, ci, (1 << sid), 0, 0);
++        runner_do_stars_sort(r, ci, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+       }
+       if (!(cj->hydro.sorted & (1 << sid)) ||
+           cj->hydro.dx_max_sort_old > cj->dmin * space_maxreldx) {
+@@ -1435,7 +1436,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+       }
+       if (!(cj->stars.sorted & (1 << sid)) ||
+           cj->stars.dx_max_sort_old > cj->dmin * space_maxreldx) {
+-        runner_do_stars_sort(r, cj, (1 << sid), 0, 0);
++        runner_do_stars_sort(r, cj, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+       }
+     }
+ 
+@@ -1466,7 +1468,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+       if (do_ci) {
+         if (!(ci->stars.sorted & (1 << sid)) ||
+             ci->stars.dx_max_sort_old > ci->dmin * space_maxreldx) {
+-          runner_do_stars_sort(r, ci, (1 << sid), 0, 0);
++          runner_do_stars_sort(r, ci, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+         }
+         if (!(cj->hydro.sorted & (1 << sid)) ||
+             cj->hydro.dx_max_sort_old > cj->dmin * space_maxreldx) {
+@@ -1484,7 +1487,8 @@ void DOSUB_PAIR1_STARS(struct runner *r, struct cell *ci, struct cell *cj,
+         }
+         if (!(cj->stars.sorted & (1 << sid)) ||
+             cj->stars.dx_max_sort_old > cj->dmin * space_maxreldx) {
+-          runner_do_stars_sort(r, cj, (1 << sid), 0, 0);
++          runner_do_stars_sort(r, cj, (1 << sid), /*cleanup=*/0, /*lock=*/1,
++                             /*clock=*/0);
+         }
+       }
+ 
+diff --git a/src/runner_main.c b/src/runner_main.c
+index 0aaeede7e..16ce34e08 100644
+--- a/src/runner_main.c
++++ b/src/runner_main.c
+@@ -358,7 +358,8 @@ void *runner_main(void *data) {
+           /* Cleanup only if any of the indices went stale. */
+           runner_do_stars_sort(
+               r, ci, t->flags,
+-              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin, 1);
++              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin,
++              /*lock=*/0, /*clock=*/1);
+           /* Reset the sort flags as our work here is done. */
+           t->flags = 0;
+           break;
+diff --git a/src/runner_sort.c b/src/runner_sort.c
+index 8760764fd..542e801ee 100644
+--- a/src/runner_sort.c
++++ b/src/runner_sort.c
+@@ -475,7 +475,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flags,
+  *      for recursive calls.
+  */
+ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+-                          int cleanup, int clock) {
++                          int cleanup, const int lock, int clock) {
+ 
+   struct sort_entry *fingers[8];
+   const int count = c->stars.count;
+@@ -488,6 +488,24 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   if (c->hydro.super == NULL) error("Task called above the super level!!!");
+ #endif
+ 
++  /* Should we lock the cell? This is needed when the sort is triggered on the
++   * fly from the stars feedback interactions (outside the task graph), where
++   * another runner thread may concurrently (re)sort the same cell. The
++   * scheduled stars_sort task does not need it (dependencies serialise it). */
++  if (lock) lock_lock(&c->stars.extra_sort_lock);
++
++  /* Now that we acquired the lock, verify whether it has not been already
++   * sorted while we were waiting. */
++  if (lock) {
++    if ((c->stars.sorted & flags) &&
++        c->stars.dx_max_sort_old <= c->dmin * space_maxreldx) {
++      /* Another thread did the sort while we were waiting. Release and exit. */
++      if (lock_unlock(&c->stars.extra_sort_lock) != 0)
++        error("Impossible to unlock the cell!");
++      return;
++    }
++  }
++
+   /* We need to do the local sorts plus whatever was requested further up. */
+   flags |= c->stars.do_sort;
+   if (cleanup) {
+@@ -495,7 +513,12 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   } else {
+     flags &= ~c->stars.sorted;
+   }
+-  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) return;
++  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) {
++    /* Unlock before returning */
++    if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
++      error("Impossible to unlock the cell!");
++    return;
++  }
+ 
+   /* Check that the particles have been moved to the current time */
+   if (flags && !cell_are_spart_drifted(c, r->e)) {
+@@ -536,7 +559,7 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+           const int cleanup_prog =
+               cleanup && (c->progeny[k]->stars.dx_max_sort_old >
+                           space_maxreldx * c->progeny[k]->dmin);
+-          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, 0);
++          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, lock, 0);
+           dx_max_sort = max(dx_max_sort, c->progeny[k]->stars.dx_max_sort);
+           dx_max_sort_old =
+               max(dx_max_sort_old, c->progeny[k]->stars.dx_max_sort_old);
+@@ -688,6 +711,10 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
+   cell_clear_flag(c, cell_flag_do_stars_sub_sort);
+   c->stars.requires_sorts = 0;
+ 
++  /* Make sure we unlock if necessary */
++  if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
++
+   if (clock) TIMER_TOC(timer_do_stars_sort);
+ }
+ 
+@@ -759,7 +786,7 @@ void runner_do_all_stars_sort(struct runner *r, struct cell *c) {
+   if (c->hydro.super == c) {
+ 
+     /* Sort everything */
+-    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*timer=*/0);
++    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*lock=*/0, /*timer=*/0);
+ 
+   } else {
+ 
+diff --git a/src/space.c b/src/space.c
+index 9269ce002..3ba147550 100644
+--- a/src/space.c
++++ b/src/space.c
+@@ -530,6 +530,7 @@ void space_getcells(struct space *s, int nr_cells, struct cell **cells,
+     cells[j]->tpid = tpid;
+     if (lock_init(&cells[j]->hydro.lock) != 0 ||
+         lock_init(&cells[j]->hydro.extra_sort_lock) != 0 ||
++        lock_init(&cells[j]->stars.extra_sort_lock) != 0 ||
+         lock_init(&cells[j]->grav.plock) != 0 ||
+         lock_init(&cells[j]->grav.mlock) != 0 ||
+         lock_init(&cells[j]->stars.lock) != 0 ||
+diff --git a/src/space_rebuild.c b/src/space_rebuild.c
+index 0635289cc..2dd812db5 100644
+--- a/src/space_rebuild.c
++++ b/src/space_rebuild.c
+@@ -51,9 +51,11 @@ void space_rebuild(struct space *s, int repartitioned, int verbose) {
+   const ticks tic = getticks();
+ 
+   /* We are at a barrier (no tasks reading sort arrays): free the hydro.sort
+-     buffers that cell_malloc_hydro_sorts() retired instead of freeing in place
+-     to avoid a use-after-free against lock-free readers. */
++     and stars.sort buffers that cell_malloc_{hydro,stars}_sorts() retired
++     instead of freeing in place to avoid a use-after-free against lock-free
++     readers. */
+   cell_free_retired_hydro_sorts();
++  cell_free_retired_stars_sorts();
+ 
+ /* Be verbose about this. */
+ #ifdef SWIFT_DEBUG_CHECKS
+diff --git a/src/space_recycle.c b/src/space_recycle.c
+index 9edd9a7cb..6e6a6e066 100644
+--- a/src/space_recycle.c
++++ b/src/space_recycle.c
+@@ -261,6 +261,7 @@ void space_recycle(struct space *s, struct cell *c) {
+       lock_destroy(&c->grav.mlock) != 0 || lock_destroy(&c->stars.lock) != 0 ||
+       lock_destroy(&c->sinks.lock) != 0 ||
+       lock_destroy(&c->hydro.extra_sort_lock) != 0 ||
++      lock_destroy(&c->stars.extra_sort_lock) != 0 ||
+       lock_destroy(&c->sinks.sink_formation_lock) != 0 ||
+       lock_destroy(&c->black_holes.lock) != 0 ||
+       lock_destroy(&c->grav.star_formation_lock) != 0 ||
+@@ -312,6 +313,7 @@ void space_recycle_list(struct space *s, struct cell *cell_list_begin,
+         lock_destroy(&c->stars.lock) != 0 ||
+         lock_destroy(&c->sinks.lock) != 0 ||
+         lock_destroy(&c->hydro.extra_sort_lock) != 0 ||
++        lock_destroy(&c->stars.extra_sort_lock) != 0 ||
+         lock_destroy(&c->sinks.sink_formation_lock) != 0 ||
+         lock_destroy(&c->black_holes.lock) != 0 ||
+         lock_destroy(&c->stars.star_formation_lock) != 0 ||
+diff --git a/src/space_regrid.c b/src/space_regrid.c
+index 3138050df..6b45cc12b 100644
+--- a/src/space_regrid.c
++++ b/src/space_regrid.c
+@@ -280,6 +280,8 @@ void space_regrid(struct space *s, int verbose) {
+         error("Failed to init spinlock for hydro.");
+       if (lock_init(&s->cells_top[k].hydro.extra_sort_lock) != 0)
+         error("Failed to init spinlock for hydro extra sort.");
++      if (lock_init(&s->cells_top[k].stars.extra_sort_lock) != 0)
++        error("Failed to init spinlock for stars extra sort.");
+       if (lock_init(&s->cells_top[k].grav.plock) != 0)
+         error("Failed to init spinlock for gravity.");
+       if (lock_init(&s->cells_top[k].grav.mlock) != 0)

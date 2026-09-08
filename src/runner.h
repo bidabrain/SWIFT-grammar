@@ -106,7 +106,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flag,
                           const int cleanup, const int lock,
                           const int rt_requests_sort, const int clock);
 void runner_do_stars_sort(struct runner *r, struct cell *c, int flag,
-                          int cleanup, int clock);
+                          int cleanup, const int lock, int clock);
 void runner_do_all_hydro_sort(struct runner *r, struct cell *c);
 void runner_do_all_stars_sort(struct runner *r, struct cell *c);
 void runner_do_drift_part(struct runner *r, struct cell *c, int timer);
