@@ -104,6 +104,55 @@ void cell_free_retired_hydro_sorts(void) {
   cell_retired_sorts_count = 0;
 }
 
+/* Retired stars.sort buffers. Same rationale as the hydro.sort list above:
+ * cell_malloc_stars_sorts() grows a cell's stars sort array by allocating a new
+ * one; it must NOT swift_free() the old buffer in place because a concurrent
+ * feedback reader (walking c->stars.sort with only the extra_sort_lock, or an
+ * on-the-fly re-sort on a shared cell) may still be using it -> use-after-free.
+ * Retire here and free at the next rebuild barrier (cell_free_retired_stars_
+ * sorts, from space_rebuild). */
+static void **cell_retired_stars_sorts = NULL;
+static size_t cell_retired_stars_sorts_count = 0;
+static size_t cell_retired_stars_sorts_size = 0;
+static pthread_mutex_t cell_retired_stars_sorts_lock =
+    PTHREAD_MUTEX_INITIALIZER;
+
+/**
+ * @brief Retire a grown-over stars.sort buffer for deferred freeing.
+ *
+ * Thread-safe: called concurrently from runner threads under each cell's
+ * stars.extra_sort_lock. Freed later by cell_free_retired_stars_sorts().
+ *
+ * @param ptr The old stars.sort buffer (may be NULL).
+ */
+void cell_retire_stars_sort(void *ptr) {
+  if (ptr == NULL) return;
+  pthread_mutex_lock(&cell_retired_stars_sorts_lock);
+  if (cell_retired_stars_sorts_count == cell_retired_stars_sorts_size) {
+    cell_retired_stars_sorts_size =
+        cell_retired_stars_sorts_size ? 2 * cell_retired_stars_sorts_size : 1024;
+    cell_retired_stars_sorts = (void **)realloc(
+        cell_retired_stars_sorts,
+        cell_retired_stars_sorts_size * sizeof(void *));
+    if (cell_retired_stars_sorts == NULL)
+      error("Failed to grow the retired stars.sort list.");
+  }
+  cell_retired_stars_sorts[cell_retired_stars_sorts_count++] = ptr;
+  pthread_mutex_unlock(&cell_retired_stars_sorts_lock);
+}
+
+/**
+ * @brief Free all retired stars.sort buffers.
+ *
+ * Must be called only at a rebuild barrier (single-threaded, no task reading
+ * sort arrays), e.g. from space_rebuild().
+ */
+void cell_free_retired_stars_sorts(void) {
+  for (size_t i = 0; i < cell_retired_stars_sorts_count; i++)
+    swift_free("stars.sort", cell_retired_stars_sorts[i]);
+  cell_retired_stars_sorts_count = 0;
+}
+
 /** List of cell pairs for sub-cell recursion. For any sid, the entries in
  * this array contain the number of sub-cell pairs and the indices and sid
  * of the sub-cell pairs themselves. */

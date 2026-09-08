@@ -1376,6 +1376,8 @@ __attribute__((always_inline)) INLINE static void cell_ensure_tagged(
 /* Deferred reclamation of grown-over hydro.sort buffers (see cell.c). */
 void cell_retire_hydro_sort(void *ptr);
 void cell_free_retired_hydro_sorts(void);
+void cell_retire_stars_sort(void *ptr);
+void cell_free_retired_stars_sorts(void);
 
 /**
  * @brief Allocate hydro sort memory for cell.
@@ -1545,8 +1547,11 @@ __attribute__((always_inline)) INLINE static void cell_malloc_stars_sorts(
       }
     }
 
-    /* Swap the pointers */
-    swift_free("stars.sort", c->stars.sort);
+    /* Swap the pointers. Do NOT swift_free() the old buffer in place: a
+       concurrent feedback reader or on-the-fly re-sort on a shared cell may
+       still be walking it (use-after-free). Retire it and free at the next
+       rebuild barrier (cell_free_retired_stars_sorts, from space_rebuild). */
+    cell_retire_stars_sort(c->stars.sort);
     c->stars.sort = new_array;
 
   } else {

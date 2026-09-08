@@ -475,7 +475,7 @@ void runner_do_hydro_sort(struct runner *r, struct cell *c, int flags,
  *      for recursive calls.
  */
 void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
-                          int cleanup, int clock) {
+                          int cleanup, const int lock, int clock) {
 
   struct sort_entry *fingers[8];
   const int count = c->stars.count;
@@ -488,6 +488,24 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
   if (c->hydro.super == NULL) error("Task called above the super level!!!");
 #endif
 
+  /* Should we lock the cell? This is needed when the sort is triggered on the
+   * fly from the stars feedback interactions (outside the task graph), where
+   * another runner thread may concurrently (re)sort the same cell. The
+   * scheduled stars_sort task does not need it (dependencies serialise it). */
+  if (lock) lock_lock(&c->stars.extra_sort_lock);
+
+  /* Now that we acquired the lock, verify whether it has not been already
+   * sorted while we were waiting. */
+  if (lock) {
+    if ((c->stars.sorted & flags) &&
+        c->stars.dx_max_sort_old <= c->dmin * space_maxreldx) {
+      /* Another thread did the sort while we were waiting. Release and exit. */
+      if (lock_unlock(&c->stars.extra_sort_lock) != 0)
+        error("Impossible to unlock the cell!");
+      return;
+    }
+  }
+
   /* We need to do the local sorts plus whatever was requested further up. */
   flags |= c->stars.do_sort;
   if (cleanup) {
@@ -495,7 +513,12 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
   } else {
     flags &= ~c->stars.sorted;
   }
-  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) return;
+  if (flags == 0 && !cell_get_flag(c, cell_flag_do_stars_sub_sort)) {
+    /* Unlock before returning */
+    if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
+      error("Impossible to unlock the cell!");
+    return;
+  }
 
   /* Check that the particles have been moved to the current time */
   if (flags && !cell_are_spart_drifted(c, r->e)) {
@@ -536,7 +559,7 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
           const int cleanup_prog =
               cleanup && (c->progeny[k]->stars.dx_max_sort_old >
                           space_maxreldx * c->progeny[k]->dmin);
-          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, 0);
+          runner_do_stars_sort(r, c->progeny[k], flags, cleanup_prog, lock, 0);
           dx_max_sort = max(dx_max_sort, c->progeny[k]->stars.dx_max_sort);
           dx_max_sort_old =
               max(dx_max_sort_old, c->progeny[k]->stars.dx_max_sort_old);
@@ -688,6 +711,10 @@ void runner_do_stars_sort(struct runner *r, struct cell *c, int flags,
   cell_clear_flag(c, cell_flag_do_stars_sub_sort);
   c->stars.requires_sorts = 0;
 
+  /* Make sure we unlock if necessary */
+  if (lock && lock_unlock(&c->stars.extra_sort_lock) != 0)
+    error("Impossible to unlock the cell!");
+
   if (clock) TIMER_TOC(timer_do_stars_sort);
 }
 
@@ -759,7 +786,7 @@ void runner_do_all_stars_sort(struct runner *r, struct cell *c) {
   if (c->hydro.super == c) {
 
     /* Sort everything */
-    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*timer=*/0);
+    runner_do_stars_sort(r, c, 0x1FFF, /*cleanup=*/0, /*lock=*/0, /*timer=*/0);
 
   } else {
 

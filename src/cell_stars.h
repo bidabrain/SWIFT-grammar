@@ -91,6 +91,10 @@ struct cell_stars {
     /*! Pointer for the sorted indices. */
     struct sort_entry *sort;
 
+    /*! Spin lock serialising on-the-fly (re)sorts of the stars sort array and
+     *  its deferred buffer reclamation (see runner_do_stars_sort). */
+    swift_lock_type extra_sort_lock;
+
     /*! Last (integer) time the cell's spart were drifted forward in time. */
     integertime_t ti_old_part;
 

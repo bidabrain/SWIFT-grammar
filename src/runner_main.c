@@ -358,7 +358,8 @@ void *runner_main(void *data) {
           /* Cleanup only if any of the indices went stale. */
           runner_do_stars_sort(
               r, ci, t->flags,
-              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin, 1);
+              ci->stars.dx_max_sort_old > space_maxreldx * ci->dmin,
+              /*lock=*/0, /*clock=*/1);
           /* Reset the sort flags as our work here is done. */
           t->flags = 0;
           break;
