@@ -1,0 +1,70 @@
+From 2bc32d46865247d4dffe8697d491967259b0c8a3 Mon Sep 17 00:00:00 2001
+From: Da Bi <isayama@Das-iMac.local>
+Date: Wed, 9 Sep 2026 14:15:52 +0900
+Subject: [PATCH] Fix data race on cell->hydro.sort from the time-step limiter
+
+The time-step limiter self/pair interaction tasks read the sorted arrays
+(DOPAIR1 directly; DOSELF1 -> DOSUB_SELF1 via its progeny sub-pairs) but,
+unlike the density and force tasks, had no dependency on the hydro sort
+task. The sort task runs with lock=0 and, when indices have gone stale,
+rewrites the sort buffer in place (cleanup re-sort). With no ordering
+between the two, a sort task could overwrite cell->hydro.sort while a
+limiter task was iterating it on another thread, yielding half-written
+sort indices and an out-of-bounds read on hydro.parts (segfault in
+runner_dopair1_branch_limiter).
+
+The earlier deferred-free fix cannot help here: this is an in-place
+overwrite of a live buffer, not a use-after-free of a freed one.
+
+Add the hydro.sorts -> t_limiter dependency (ci and, for pairs, cj when
+the supers differ), mirroring the density/force tasks. Since no drift
+happens between the sorts and the limiter within a step, cells stay
+sorted-and-fresh, so no on-the-fly re-sort rewrites the buffer during the
+limiter phase and the lock-free reads are safe.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014QEuoaGLV1UoeayXpF6SvQ
+---
+ src/engine_maketasks.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/src/engine_maketasks.c b/src/engine_maketasks.c
+index 3a8bb4e56..a4109cc89 100644
+--- a/src/engine_maketasks.c
++++ b/src/engine_maketasks.c
+@@ -2666,6 +2666,14 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
+       if (with_timestep_limiter) {
+         t_limiter = scheduler_addtask(sched, task_type_self,
+                                       task_subtype_limiter, flags, 0, ci, NULL);
++
++        /* The limiter's sub-pair recursion reads the sorted arrays. Make it
++         * depend on the sorts so the sort task cannot rewrite the sort buffer
++         * in place (cleanup re-sort) while the limiter is iterating it. This
++         * is the same dependency the density/force tasks already have; without
++         * it the lock-free limiter reader can pick up half-written sort indices
++         * and do an out-of-bounds read on hydro.parts. */
++        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
+       }
+ 
+       /* The stellar feedback tasks */
+@@ -2975,6 +2983,17 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
+       if (with_timestep_limiter) {
+         t_limiter = scheduler_addtask(sched, task_type_pair,
+                                       task_subtype_limiter, flags, 0, ci, cj);
++
++        /* The limiter reads the sorted arrays. Make it depend on the sorts so
++         * the sort task cannot rewrite the sort buffer in place (cleanup
++         * re-sort) while the limiter is iterating it. This is the same
++         * dependency the density/force tasks already have; without it the
++         * lock-free limiter reader can pick up half-written sort indices and
++         * do an out-of-bounds read on hydro.parts. */
++        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
++        if (ci->hydro.super != cj->hydro.super) {
++          scheduler_addunlock(sched, cj->hydro.super->hydro.sorts, t_limiter);
++        }
+       }
+ 
+       /* The stellar feedback tasks */
+-- 
+2.39.2 (Apple Git-143)
+
