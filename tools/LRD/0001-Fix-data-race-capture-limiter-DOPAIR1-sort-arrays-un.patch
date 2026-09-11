@@ -1,0 +1,76 @@
+From 5091f387bff22a979fcd3db2e3b5534989f0a98f Mon Sep 17 00:00:00 2001
+From: Da Bi <isayama@Das-iMac.local>
+Date: Fri, 11 Sep 2026 13:48:36 +0900
+Subject: [PATCH] Fix data race: capture limiter DOPAIR1 sort arrays under
+ extra_sort_lock
+
+Confirmed via a single-threaded run (no crash) that the segfault in
+runner_dopair1_branch_limiter is a shared-memory data race on
+cell->hydro.sort, not an out-of-bounds from the physics/config.
+
+The limiter's DOPAIR1 read the sorted arrays lock-free:
+    sort_i = cell_get_hydro_sorts(ci, sid);
+    sort_j = cell_get_hydro_sorts(cj, sid);
+The limiter recurses (DOSUB_PAIR1) and sorts sub-cells on-the-fly, so
+another runner thread can be inside runner_do_hydro_sort() ->
+cell_malloc_hydro_sorts() for the same cell, growing and swapping
+c->hydro.sort together with c->hydro.sort_allocated. cell_get_hydro_sorts()
+computes an offset from sort_allocated and indexes c->hydro.sort; reading
+both lock-free yields a torn (pointer, offset) pair, a bogus sort_entry
+array, out-of-range indices, and an out-of-bounds read on hydro.parts.
+
+Capture the base pointers under each cell's extra_sort_lock. Holding the
+lock only across the capture is sufficient: grown-over buffers are retired
+and freed at the rebuild barrier (deferred free), not in place, so the
+captured array stays valid for the whole interaction. Locking one cell at
+a time (never both at once) avoids any two-lock deadlock.
+
+Complements the earlier hydro.sorts -> t_limiter dependency (which orders
+the lock=0 sort task before the limiter); this commit closes the race with
+the lock=1 on-the-fly sorts that the dependency does not cover.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014QEuoaGLV1UoeayXpF6SvQ
+---
+ src/runner_doiact_functions_limiter.h | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/src/runner_doiact_functions_limiter.h b/src/runner_doiact_functions_limiter.h
+index 08eff7f32..de5d2a880 100644
+--- a/src/runner_doiact_functions_limiter.h
++++ b/src/runner_doiact_functions_limiter.h
+@@ -301,9 +301,30 @@ void DOPAIR1(struct runner *r, const struct cell *restrict ci,
+   double rshift = 0.0;
+   for (int k = 0; k < 3; k++) rshift += shift[k] * runner_shift[sid][k];
+ 
+-  /* Pick-out the sorted lists. */
++  /* Pick-out the sorted lists.
++   *
++   * We must capture the base pointers under each cell's extra_sort_lock. The
++   * time-step limiter recurses (DOSUB_PAIR1) and sorts sub-cells on-the-fly,
++   * so another runner thread can be inside runner_do_hydro_sort() ->
++   * cell_malloc_hydro_sorts() for the same cell, which grows and swaps
++   * c->hydro.sort together with c->hydro.sort_allocated. Reading them lock-free
++   * can yield a torn (pointer, offset) pair from cell_get_hydro_sorts() and
++   * hence a bogus sort_entry array -> out-of-range indices -> out-of-bounds
++   * read on hydro.parts. Holding the lock only across the capture is enough:
++   * the grown-over buffer is not freed in place but retired and freed at the
++   * next rebuild barrier (deferred free), so the captured array stays valid for
++   * the whole interaction and we avoid holding two cell locks at once (which
++   * could deadlock). */
++  struct cell *ci_mut = (struct cell *)ci;
++  struct cell *cj_mut = (struct cell *)cj;
++  lock_lock(&ci_mut->hydro.extra_sort_lock);
+   const struct sort_entry *restrict sort_i = cell_get_hydro_sorts(ci, sid);
++  if (lock_unlock(&ci_mut->hydro.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
++  lock_lock(&cj_mut->hydro.extra_sort_lock);
+   const struct sort_entry *restrict sort_j = cell_get_hydro_sorts(cj, sid);
++  if (lock_unlock(&cj_mut->hydro.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
+ 
+ #ifdef SWIFT_DEBUG_CHECKS
+   /* Some constants used to checks that the parts are in the right frame */
+-- 
+2.39.2 (Apple Git-143)
+
