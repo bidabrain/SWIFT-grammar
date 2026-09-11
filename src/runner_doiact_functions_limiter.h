@@ -301,9 +301,30 @@ void DOPAIR1(struct runner *r, const struct cell *restrict ci,
   double rshift = 0.0;
   for (int k = 0; k < 3; k++) rshift += shift[k] * runner_shift[sid][k];
 
-  /* Pick-out the sorted lists. */
+  /* Pick-out the sorted lists.
+   *
+   * We must capture the base pointers under each cell's extra_sort_lock. The
+   * time-step limiter recurses (DOSUB_PAIR1) and sorts sub-cells on-the-fly,
+   * so another runner thread can be inside runner_do_hydro_sort() ->
+   * cell_malloc_hydro_sorts() for the same cell, which grows and swaps
+   * c->hydro.sort together with c->hydro.sort_allocated. Reading them lock-free
+   * can yield a torn (pointer, offset) pair from cell_get_hydro_sorts() and
+   * hence a bogus sort_entry array -> out-of-range indices -> out-of-bounds
+   * read on hydro.parts. Holding the lock only across the capture is enough:
+   * the grown-over buffer is not freed in place but retired and freed at the
+   * next rebuild barrier (deferred free), so the captured array stays valid for
+   * the whole interaction and we avoid holding two cell locks at once (which
+   * could deadlock). */
+  struct cell *ci_mut = (struct cell *)ci;
+  struct cell *cj_mut = (struct cell *)cj;
+  lock_lock(&ci_mut->hydro.extra_sort_lock);
   const struct sort_entry *restrict sort_i = cell_get_hydro_sorts(ci, sid);
+  if (lock_unlock(&ci_mut->hydro.extra_sort_lock) != 0)
+    error("Impossible to unlock the cell!");
+  lock_lock(&cj_mut->hydro.extra_sort_lock);
   const struct sort_entry *restrict sort_j = cell_get_hydro_sorts(cj, sid);
+  if (lock_unlock(&cj_mut->hydro.extra_sort_lock) != 0)
+    error("Impossible to unlock the cell!");
 
 #ifdef SWIFT_DEBUG_CHECKS
   /* Some constants used to checks that the parts are in the right frame */
