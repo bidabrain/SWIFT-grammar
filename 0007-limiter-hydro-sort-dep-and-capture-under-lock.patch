@@ -1,0 +1,73 @@
+diff --git a/src/engine_maketasks.c b/src/engine_maketasks.c
+index 3a8bb4e56..a4109cc89 100644
+--- a/src/engine_maketasks.c
++++ b/src/engine_maketasks.c
+@@ -2666,6 +2666,14 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
+       if (with_timestep_limiter) {
+         t_limiter = scheduler_addtask(sched, task_type_self,
+                                       task_subtype_limiter, flags, 0, ci, NULL);
++
++        /* The limiter's sub-pair recursion reads the sorted arrays. Make it
++         * depend on the sorts so the sort task cannot rewrite the sort buffer
++         * in place (cleanup re-sort) while the limiter is iterating it. This
++         * is the same dependency the density/force tasks already have; without
++         * it the lock-free limiter reader can pick up half-written sort indices
++         * and do an out-of-bounds read on hydro.parts. */
++        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
+       }
+ 
+       /* The stellar feedback tasks */
+@@ -2975,6 +2983,17 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
+       if (with_timestep_limiter) {
+         t_limiter = scheduler_addtask(sched, task_type_pair,
+                                       task_subtype_limiter, flags, 0, ci, cj);
++
++        /* The limiter reads the sorted arrays. Make it depend on the sorts so
++         * the sort task cannot rewrite the sort buffer in place (cleanup
++         * re-sort) while the limiter is iterating it. This is the same
++         * dependency the density/force tasks already have; without it the
++         * lock-free limiter reader can pick up half-written sort indices and
++         * do an out-of-bounds read on hydro.parts. */
++        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
++        if (ci->hydro.super != cj->hydro.super) {
++          scheduler_addunlock(sched, cj->hydro.super->hydro.sorts, t_limiter);
++        }
+       }
+ 
+       /* The stellar feedback tasks */
+diff --git a/src/runner_doiact_functions_limiter.h b/src/runner_doiact_functions_limiter.h
+index 08eff7f32..de5d2a880 100644
+--- a/src/runner_doiact_functions_limiter.h
++++ b/src/runner_doiact_functions_limiter.h
+@@ -301,9 +301,30 @@ void DOPAIR1(struct runner *r, const struct cell *restrict ci,
+   double rshift = 0.0;
+   for (int k = 0; k < 3; k++) rshift += shift[k] * runner_shift[sid][k];
+ 
+-  /* Pick-out the sorted lists. */
++  /* Pick-out the sorted lists.
++   *
++   * We must capture the base pointers under each cell's extra_sort_lock. The
++   * time-step limiter recurses (DOSUB_PAIR1) and sorts sub-cells on-the-fly,
++   * so another runner thread can be inside runner_do_hydro_sort() ->
++   * cell_malloc_hydro_sorts() for the same cell, which grows and swaps
++   * c->hydro.sort together with c->hydro.sort_allocated. Reading them lock-free
++   * can yield a torn (pointer, offset) pair from cell_get_hydro_sorts() and
++   * hence a bogus sort_entry array -> out-of-range indices -> out-of-bounds
++   * read on hydro.parts. Holding the lock only across the capture is enough:
++   * the grown-over buffer is not freed in place but retired and freed at the
++   * next rebuild barrier (deferred free), so the captured array stays valid for
++   * the whole interaction and we avoid holding two cell locks at once (which
++   * could deadlock). */
++  struct cell *ci_mut = (struct cell *)ci;
++  struct cell *cj_mut = (struct cell *)cj;
++  lock_lock(&ci_mut->hydro.extra_sort_lock);
+   const struct sort_entry *restrict sort_i = cell_get_hydro_sorts(ci, sid);
++  if (lock_unlock(&ci_mut->hydro.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
++  lock_lock(&cj_mut->hydro.extra_sort_lock);
+   const struct sort_entry *restrict sort_j = cell_get_hydro_sorts(cj, sid);
++  if (lock_unlock(&cj_mut->hydro.extra_sort_lock) != 0)
++    error("Impossible to unlock the cell!");
+ 
+ #ifdef SWIFT_DEBUG_CHECKS
+   /* Some constants used to checks that the parts are in the right frame */

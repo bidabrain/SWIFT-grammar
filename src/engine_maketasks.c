@@ -2666,6 +2666,14 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
       if (with_timestep_limiter) {
         t_limiter = scheduler_addtask(sched, task_type_self,
                                       task_subtype_limiter, flags, 0, ci, NULL);
+
+        /* The limiter's sub-pair recursion reads the sorted arrays. Make it
+         * depend on the sorts so the sort task cannot rewrite the sort buffer
+         * in place (cleanup re-sort) while the limiter is iterating it. This
+         * is the same dependency the density/force tasks already have; without
+         * it the lock-free limiter reader can pick up half-written sort indices
+         * and do an out-of-bounds read on hydro.parts. */
+        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
       }
 
       /* The stellar feedback tasks */
@@ -2975,6 +2983,17 @@ void engine_make_extra_hydroloop_tasks_mapper(void *map_data, int num_elements,
       if (with_timestep_limiter) {
         t_limiter = scheduler_addtask(sched, task_type_pair,
                                       task_subtype_limiter, flags, 0, ci, cj);
+
+        /* The limiter reads the sorted arrays. Make it depend on the sorts so
+         * the sort task cannot rewrite the sort buffer in place (cleanup
+         * re-sort) while the limiter is iterating it. This is the same
+         * dependency the density/force tasks already have; without it the
+         * lock-free limiter reader can pick up half-written sort indices and
+         * do an out-of-bounds read on hydro.parts. */
+        scheduler_addunlock(sched, ci->hydro.super->hydro.sorts, t_limiter);
+        if (ci->hydro.super != cj->hydro.super) {
+          scheduler_addunlock(sched, cj->hydro.super->hydro.sorts, t_limiter);
+        }
       }
 
       /* The stellar feedback tasks */
