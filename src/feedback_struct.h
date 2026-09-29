@@ -34,6 +34,8 @@
 #include "./feedback/EAGLE_thermal/feedback_struct.h"
 #elif defined(FEEDBACK_EAGLE_KINETIC)
 #include "./feedback/EAGLE_kinetic/feedback_struct.h"
+#elif defined(FEEDBACK_EAGLE_THERMAL_KINETIC)
+#include "./feedback/EAGLE_thermal_kinetic/feedback_struct.h"
 #elif defined(FEEDBACK_GEAR)
 #include "./feedback/GEAR_thermal/feedback_struct.h"
 #elif defined(FEEDBACK_AGORA)
