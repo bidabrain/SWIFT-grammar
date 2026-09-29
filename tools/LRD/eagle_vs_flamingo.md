@@ -223,6 +223,84 @@ of these reach super-Eddington at cosmological resolution.
 
 ---
 
+## 6b. COLIBRE — the cold-ISM successor (Chaikin et al. 2026, arXiv 2509.04067)
+
+COLIBRE is the EAGLE/FLAMINGO successor that actually **models a cold gas phase**.
+It differs from EAGLE-XL/FLAMINGO in the ISM/cooling/SF layer, not just feedback.
+
+- **No effective pressure or temperature floor.** Paper (verbatim): "the colibre
+  model **does not impose an effective pressure and/or temperature floor**." Both
+  the Jeans floor (γ=4/3 sloped line) AND the Cool floor (horizontal line) are
+  removed; gas follows the real cooling curve down into the cold phase.
+- **Anti-fragmentation via softened gravity, not a floor.** Ploeckinger et al.
+  (2024): with softened gravity the relevant Jeans mass is the *softened* Jeans
+  mass (≫ Newtonian), so artificial fragmentation is suppressed without a floor.
+- **Cooling: CHIMES non-equilibrium thermochemistry + dust model** — NOT the
+  PS2020 equilibrium tables. Tracks H2/HI directly (non-equilibrium), with
+  self-shielding, molecule formation/dissociation, and dust. This supplies the
+  cold-phase physics the Cool floor used to stand in for.
+- **Star formation: Schmidt (1959) law, ε = 0.01 per free-fall time**
+  (SFR ∝ ρ/t_ff), applied to cold gas — NOT the Schaye & Dalla Vecchia (2008)
+  pressure law (which was tied to the eEOS). This is the
+  `eagle_star_formation_schmidt_law` option already present in SWIFT.
+- **Feedback: thermal-kinetic dual channel** (Chaikin et al. 2023) with a tunable
+  **f_kin** = fraction of the *coupled* feedback energy injected kinetically
+  (thermal gets 1−f_kin). f_kin does **not** change the total coupled energy
+  (still f_E·N_SN·E_SN) — it only splits it. EAGLE-XL = f_kin 0 (all thermal),
+  FLAMINGO = f_kin 1 (all kinetic) are the two **endpoints**; COLIBRE uses an
+  intermediate mix.
+
+Why COLIBRE can drop both floors: each floor was a stopgap for a missing
+capability — the **Cool floor** for missing cold-ISM cooling physics (now
+supplied by CHIMES+dust), the **Jeans floor** for Newtonian-Jeans fragmentation
+(now handled by the softened-Jeans argument). COLIBRE supplies both root
+capabilities, so both floors become unnecessary.
+
+**Three-way comparison:**
+
+| | EAGLE-XL (yours) | FLAMINGO (yours) | COLIBRE |
+|---|---|---|---|
+| Jeans floor (γ=4/3) | yes | yes | **no** |
+| Cool floor | yes | yes | **no** |
+| cooling | PS2020 equilibrium | PS2020 equilibrium | **CHIMES non-eq + dust** |
+| cold ISM | no (eEOS ~10⁴ K) | no (eEOS) | **yes (to cold phase)** |
+| SF law | Schaye pressure law | Schaye pressure law | **Schmidt ε=0.01/t_ff** |
+| SN feedback | thermal (f_kin=0) | kinetic (f_kin=1) | **thermal-kinetic (0<f_kin<1)** |
+| runnable in this SWIFT? | yes | yes | **no** (needs CHIMES cooling + dual-channel feedback module) |
+
+**Not runnable in this branch:** `src/cooling/` has no CHIMES (only PS2020,
+EAGLE, grackle, …) and `src/feedback/` has no dual-channel module (only
+`EAGLE_thermal`/`EAGLE_kinetic` endpoints). COLIBRE needs its own SWIFT branch.
+
+## 6c. Can I swap ONLY the SN feedback (→ dual channel) into EAGLE-XL/FLAMINGO?
+
+Short answer: it would not crash, but it is **not sound** — feedback is
+co-calibrated with the cooling + floor + SF law, and the dual channel's
+innovation needs the cold-ISM regime that EAGLE-XL/FLAMINGO do not have.
+
+1. **The module isn't here** — only the two endpoints (thermal / kinetic).
+2. **Calibration doesn't transfer.** The dual-channel params (f_kin, Δv, ΔT,
+   f_E) were tuned for COLIBRE's full model (CHIMES + no floor + Schmidt SF).
+   Under an eEOS + PS2020 + pressure-law setup they will not reproduce z=0 galaxy
+   properties → full re-calibration needed. Feedback is not a drop-in.
+3. **The kinetic channel's raison d'être is muted by the eEOS.** Its job is to
+   drive real ISM turbulence in the neutral/cold ISM; but the eEOS already
+   pressure-supports the ISM (turbulence is faked by the floor), and the
+   pressure-law SF depends on that (floored) pressure — so the kinetic channel's
+   intended effect on SF regulation is short-circuited. You'd get it acting mainly
+   as a wind driver (≈ what FLAMINGO's pure-kinetic already does), losing the
+   dual-channel's physical advantage.
+4. **Note:** FLAMINGO already shows *pure* kinetic (f_kin=1) works in an eEOS
+   setup *because it is calibrated as a whole*. The problem is specifically
+   borrowing COLIBRE's *intermediate* dual channel + its cold-ISM calibration
+   into an eEOS model.
+
+Bottom line: run a self-consistent, calibrated model — EAGLE-XL (thermal) or
+FLAMINGO (kinetic) as-is — or move fully to COLIBRE. Cherry-picking the
+dual-channel feedback into an eEOS setup gives mis-calibration + a design-regime
+mismatch. And for the LRD/BH science, SN feedback is secondary anyway (the
+blocker is reaching super-Eddington; see `baseline_accretion_findings.md`).
+
 ## 7. Key references
 
 - **Schaye & Dalla Vecchia (2008)**, MNRAS 383, 1210 — SF pressure law (eq. 21).
@@ -236,6 +314,12 @@ of these reach super-Eddington at cosmological resolution.
   feedback (kinetic channel = FLAMINGO's; full model = COLIBRE).
 - **Schaye et al. (2015)** — EAGLE. **Schaye et al. (2023)** — FLAMINGO.
 - **Husko et al. (2022)** — SPIN_JET black holes.
+- **Chaikin et al. (2026)**, arXiv 2509.04067 — COLIBRE model (no floors, CHIMES,
+  Schmidt SF, thermal-kinetic feedback).
+- **Ploeckinger et al. (2024)** — softened-gravity Jeans mass ⇒ effective
+  pressure floor unnecessary.
+- **Schmidt (1959)** — the ε/t_ff star-formation law COLIBRE uses.
+- CHIMES — non-equilibrium thermochemistry solver used by COLIBRE.
 
 ## 8. Confidence / caveats
 

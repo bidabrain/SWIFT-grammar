@@ -2831,11 +2831,45 @@ if test "$with_subgrid" != "none"; then
    fi
 fi
 
+# Optional override: swap the single-channel EAGLE stellar (SN) feedback selected
+# above (thermal for EAGLE-XL, kinetic for FLAMINGO, ...) for the thermal-kinetic
+# dual-channel model, while keeping everything else from the --with-subgrid preset
+# (BH model, cooling, EoS, SF, ...). Works alongside --with-subgrid=... (unlike
+# --with-feedback which conflicts with it).
+AC_ARG_WITH([stellar-feedback-mode],
+   [AS_HELP_STRING([--with-stellar-feedback-mode=<mode>],
+      [Stellar SN feedback channel mode @<:@single, thermal-kinetic default: single@:>@. 'thermal-kinetic' replaces the EAGLE single-channel feedback with the dual-channel (Chaikin+23) model.]
+   )],
+   [with_stellar_feedback_mode="$withval"],
+   [with_stellar_feedback_mode="single"]
+)
+case "$with_stellar_feedback_mode" in
+   single)
+   ;;
+   thermal-kinetic)
+      case "$with_feedback" in
+         EAGLE|EAGLE-thermal|EAGLE-kinetic)
+            with_feedback="EAGLE-thermal-kinetic"
+         ;;
+         *)
+            AC_MSG_ERROR([--with-stellar-feedback-mode=thermal-kinetic requires an EAGLE-family feedback (e.g. from --with-subgrid=EAGLE-XL/FLAMINGO/SPIN_JET_EAGLE-XL/SPIN_JET_FLAMINGO), but got '$with_feedback'.])
+         ;;
+      esac
+   ;;
+   *)
+      AC_MSG_ERROR([Unknown stellar-feedback-mode: '$with_stellar_feedback_mode' (allowed: single, thermal-kinetic)])
+   ;;
+esac
+
 with_feedback_name="none"
 case "$with_feedback" in
    EAGLE-kinetic)
       AC_DEFINE([FEEDBACK_EAGLE_KINETIC], [1], [EAGLE kinetic stellar feedback and evolution model])
       with_feedback_name="EAGLE kinetic stellar feedback and evolution model"
+   ;;
+   EAGLE-thermal-kinetic)
+      AC_DEFINE([FEEDBACK_EAGLE_THERMAL_KINETIC], [1], [EAGLE thermal-kinetic dual-channel stellar feedback and evolution model])
+      with_feedback_name="EAGLE thermal-kinetic (dual-channel, Chaikin+23) stellar feedback and evolution model"
    ;;
    EAGLE-thermal)
       AC_DEFINE([FEEDBACK_EAGLE_THERMAL], [1], [EAGLE thermal stellar feedback and evolution model])
@@ -3322,6 +3356,7 @@ AM_CONDITIONAL([HAVEPS2020COOLING], [test "$with_cooling" = "PS2020"])
 # Check if using EAGLE feedback
 AM_CONDITIONAL([HAVEEAGLETHERMALFEEDBACK], [test "${with_feedback%-thermal}" = "EAGLE"])
 AM_CONDITIONAL([HAVEEAGLEKINETICFEEDBACK], [test "$with_feedback" = "EAGLE-kinetic"])
+AM_CONDITIONAL([HAVEEAGLETHERMALKINETICFEEDBACK], [test "$with_feedback" = "EAGLE-thermal-kinetic"])
 
 # check if using grackle cooling
 AM_CONDITIONAL([HAVEGRACKLECOOLING], [test "$with_cooling" = "grackle"])

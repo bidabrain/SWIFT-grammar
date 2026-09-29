@@ -1,0 +1,105 @@
+# =============================================================================
+# EAGLEFeedback template for the DUAL-CHANNEL (thermal + kinetic) SN feedback
+# =============================================================================
+#
+# Use this when you compile with the dual-channel stellar-feedback module:
+#
+#   ./autogen.sh                 # regenerate configure (configure.ac was edited)
+#   ./configure <your flags> \
+#       --with-subgrid=SPIN_JET_FLAMINGO \       # (or SPIN_JET_EAGLE-XL / FLAMINGO / EAGLE-XL)
+#       --with-stellar-feedback-mode=thermal-kinetic
+#   make
+#
+# The --with-stellar-feedback-mode=thermal-kinetic flag ONLY replaces the
+# stellar (SN) feedback with the dual-channel model (Chaikin et al. 2023). The
+# black-hole model (SPIN_JET), cooling (PS2020), entropy floor / eEOS, star
+# formation, etc. all come from the --with-subgrid preset and are UNCHANGED.
+#
+# The module reads the SAME EAGLEFeedback parameters as the pure-kinetic
+# (EAGLE_kinetic / FLAMINGO) module, PLUS two dual-channel parameters:
+#
+#   SNII_f_kinetic   : fraction of the coupled SN energy injected KINETICALLY
+#                      (the remaining 1 - f_kinetic goes THERMALLY).
+#                      = 1  -> pure kinetic   (identical to FLAMINGO)
+#                      = 0  -> pure thermal   (identical to EAGLE-thermal)
+#                      0<f<1 -> dual channel  (COLIBRE-like; usually f small)
+#                      Optional; defaults to 1.0 if omitted.
+#   SNII_delta_T_K   : heating temperature change for the THERMAL channel.
+#                      REQUIRED when SNII_f_kinetic < 1. (~10^7.5 K = 3.16e7 is
+#                      the EAGLE value.)
+#
+# Note: SNII_delta_v_km_p_s (kinetic kick velocity) is ALWAYS required (it is
+# read by the kinetic base regardless of f_kinetic).
+#
+# f_E (SNII_energy_fraction_*) is the TOTAL coupled fraction, BEFORE the split:
+# the kinetic channel gets f_kinetic * f_E, the thermal channel (1 - f_kinetic)
+# * f_E. It does NOT change the total coupled energy.
+#
+# !!! CALIBRATION WARNING !!!
+# The values below are copied from the FLAMINGO (pure-kinetic) calibration plus
+# placeholder dual-channel values. The dual channel has NOT been calibrated for
+# an eEOS setup. Treat SNII_f_kinetic / SNII_delta_v_km_p_s / SNII_delta_T_K /
+# SNII_energy_fraction_* as knobs to (re)calibrate against z=0 galaxy properties.
+# Also: this module is a from-scratch implementation, not yet compile-tested --
+# run the validation checklist (f_kinetic=1 regression vs FLAMINGO, energy
+# conservation, ...) before any science use.
+# =============================================================================
+
+EAGLEFeedback:
+
+  # ----------------------------- DUAL-CHANNEL --------------------------------
+  SNII_f_kinetic:                       0.1             # NEW: kinetic energy fraction (0=pure thermal, 1=pure kinetic). Start point only -- recalibrate.
+  SNII_delta_v_km_p_s:                  561.807095573   # Kinetic kick velocity [km/s]. ALWAYS required.
+  SNII_delta_T_K:                       3.16228e7       # Thermal channel heating dT [K] (~10^7.5). REQUIRED when SNII_f_kinetic < 1.
+  # ---------------------------------------------------------------------------
+
+  # ----------------------- global switches / enrichment ----------------------
+  use_SNII_feedback:                    1
+  use_SNIa_feedback:                    1
+  use_AGB_enrichment:                   1
+  use_SNII_enrichment:                  1
+  use_SNIa_enrichment:                  1
+  filename:                             ./yieldtables/  # EAGLE yield tables directory.
+
+  # ------------------------------- IMF / masses ------------------------------
+  IMF_min_mass_Msun:                    0.1
+  IMF_max_mass_Msun:                    100.0
+  SNII_min_mass_Msun:                   8.0
+  SNII_max_mass_Msun:                   100.0
+  SNII_sampled_delay:                   1
+  SNII_energy_erg:                      1.0e51
+
+  # ---------------- f_E: total coupled energy fraction (before split) --------
+  # Constant f_E when min == max (FLAMINGO style); density/metallicity-dependent
+  # sigmoid when min < max (EAGLE style).
+  SNII_energy_fraction_min:             0.23829533
+  SNII_energy_fraction_max:             0.23829533
+  SNII_energy_fraction_Z_0:             0.0012663729
+  SNII_energy_fraction_n_0_H_p_cm3:     1.4588
+  SNII_energy_fraction_n_Z:             0.8686
+  SNII_energy_fraction_n_n:             0.8686
+  SNII_energy_fraction_use_birth_density:     0
+  SNII_energy_fraction_use_birth_metallicity: 0
+
+  # --------------------------------- SNIa ------------------------------------
+  SNIa_DTD:                             Exponential
+  SNIa_DTD_delay_Gyr:                   0.04
+  SNIa_DTD_exp_timescale_Gyr:           2.0
+  SNIa_DTD_exp_norm_p_Msun:             0.002
+  SNIa_energy_erg:                      1.0e51
+
+  # ------------------------------ AGB / sampling -----------------------------
+  AGB_ejecta_velocity_km_p_s:           10.0
+  stellar_evolution_age_cut_Gyr:        0.1
+  stellar_evolution_sampling_rate:      10
+
+  # ------------------------------ yield factors ------------------------------
+  SNII_yield_factor_Hydrogen:           1.0
+  SNII_yield_factor_Helium:             1.0
+  SNII_yield_factor_Carbon:             0.5
+  SNII_yield_factor_Nitrogen:           1.0
+  SNII_yield_factor_Oxygen:             1.0
+  SNII_yield_factor_Neon:               1.0
+  SNII_yield_factor_Magnesium:          2.0
+  SNII_yield_factor_Silicon:            1.0
+  SNII_yield_factor_Iron:               0.5

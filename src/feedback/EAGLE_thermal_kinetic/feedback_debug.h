@@ -1,6 +1,6 @@
 /*******************************************************************************
  * This file is part of SWIFT.
- * Copyright (c) 2018 Matthieu Schaller (schaller@strw.leidenuniv.nl)
+ * Copyright (c) 2022 Bert Vandenbroucke (bert.vandenbroucke@gmail.com)
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published
@@ -16,29 +16,10 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  ******************************************************************************/
-#ifndef SWIFT_FEEDBACK_H
-#define SWIFT_FEEDBACK_H
+#ifndef SWIFT_FEEDBACK_EAGLE_THERMAL_KINETIC_DEBUG_H
+#define SWIFT_FEEDBACK_EAGLE_THERMAL_KINETIC_DEBUG_H
 
-/* Config parameters. */
-#include <config.h>
+__attribute__((always_inline)) INLINE static void feedback_debug_particle(
+    const struct part *p, const struct xpart *xp) {}
 
-/* Select the correct feedback model */
-#if defined(FEEDBACK_NONE)
-#include "./feedback/none/feedback.h"
-#elif defined(FEEDBACK_EAGLE_THERMAL)
-#include "./feedback/EAGLE_thermal/feedback.h"
-#elif defined(FEEDBACK_EAGLE_KINETIC)
-#include "./feedback/EAGLE_kinetic/feedback.h"
-#define EXTRA_STAR_LOOPS
-#elif defined(FEEDBACK_EAGLE_THERMAL_KINETIC)
-#include "./feedback/EAGLE_thermal_kinetic/feedback.h"
-#define EXTRA_STAR_LOOPS
-#elif defined(FEEDBACK_GEAR)
-#include "./feedback/GEAR_thermal/feedback.h"
-#elif defined(FEEDBACK_AGORA)
-#include "./feedback/AGORA/feedback.h"
-#else
-#error "Invalid choice of feedback model"
-#endif
-
-#endif
+#endif /* SWIFT_FEEDBACK_EAGLE_THERMAL_KINETIC_DEBUG_H */
