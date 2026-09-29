@@ -44,7 +44,8 @@
 
 /* Check if the pressure floor is implemented in the stellar feedback */
 #ifdef PRESSURE_FLOOR_GEAR
-#if defined(FEEDBACK_EAGLE_THERMAL) || defined(FEEDBACK_EAGLE_KINETIC)
+#if defined(FEEDBACK_EAGLE_THERMAL) || defined(FEEDBACK_EAGLE_KINETIC) || \
+    defined(FEEDBACK_EAGLE_THERMAL_KINETIC)
 #error Pressure floor not implemented in this stellar feedback scheme
 #endif
 #endif
