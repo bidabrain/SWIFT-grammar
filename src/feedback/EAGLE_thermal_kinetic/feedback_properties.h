@@ -289,6 +289,27 @@ struct feedback_props {
    * feedback time? */
   int use_birth_Z_for_f_th;
 
+  /*! f_E model selector: 0 = density/metallicity power-law sigmoid (EAGLE/
+   * FLAMINGO style, the default); 1 = COLIBRE pressure-based logistic
+   * (Chaikin et al. 2026, eq. 2), using the star's BIRTH pressure. */
+  int energy_fraction_model;
+
+  /*! COLIBRE f_E: pivot of the birth pressure P/k_B, in cgs (K cm^-3). Only
+   * used when energy_fraction_model == 1. */
+  float f_E_P_pivot_cgs;
+
+  /*! COLIBRE f_E: width sigma_P of the logistic transition (dex of log10 P).
+   * Only used when energy_fraction_model == 1. */
+  float f_E_sigma_P;
+
+  /*! Temperature -> cgs (K) conversion factor, used to form the COLIBRE birth
+   * pressure n_H,birth * T_birth / (X_H * mu). */
+  float T_to_cgs;
+
+  /*! X_H * mu_ionised, converting n_H -> n_total for the COLIBRE birth pressure
+   * (P/k_B = n_H T / (X_H mu) = rho T / (mu m_H)). */
+  float f_E_mu_XH;
+
   /* ------------ Enrichment sampling properties ------------ */
 
   /*! Star age above which the enrichment will be downsampled (in internal

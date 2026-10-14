@@ -51,6 +51,25 @@ double eagle_feedback_energy_fraction(const struct spart *sp,
   /* Model parameters */
   const double f_E_max = props->f_E_max;
   const double f_E_min = props->f_E_min;
+
+  /* COLIBRE pressure-based logistic f_E (Chaikin et al. 2026, eq. 2): f_E
+   * transitions from f_E_min to f_E_max around a pivot BIRTH pressure, with
+   * transition width sigma_P (in log10 P). The birth pressure / k_B is
+   * approximated by n_H,birth * T_birth (in K cm^-3). */
+  if (props->energy_fraction_model == 1) {
+    const double nH_birth_cgs = sp->birth_density * props->rho_to_n_cgs;
+    const double T_birth_cgs = sp->birth_temperature * props->T_to_cgs;
+    /* Thermal pressure / k_B = n_total * T = rho T / (mu m_H)
+     *                        = n_H * T / (X_H * mu)   [K cm^-3].
+     * mu = mu_ionised (same value the code uses in temp_to_u_factor). */
+    const double P_over_kB = nH_birth_cgs * T_birth_cgs / props->f_E_mu_XH;
+    const double x =
+        (log10(max(P_over_kB, 1e-30)) - log10((double)props->f_E_P_pivot_cgs)) /
+        (double)props->f_E_sigma_P;
+    return f_E_min + (f_E_max - f_E_min) / (1. + exp(-x));
+  }
+
+  /* --- Power-law (density/metallicity) model (default) --- */
   const double Z_0 = props->Z_0;
   const double n_0 = props->n_0_cgs;
   const double n_Z = props->n_Z;
@@ -526,30 +545,94 @@ void feedback_props_init(struct feedback_props *fp,
   fp->log10_SNII_min_mass_msun = log10(SNII_min_mass_msun);
   fp->log10_SNII_max_mass_msun = log10(SNII_max_mass_msun);
 
-  /* Properties of the energy fraction model */
+  /* Properties of the energy fraction model.
+   *
+   * Selected by SNII_energy_fraction_model (optional, default "PowerLaw"):
+   *   "PowerLaw"        : density/metallicity power-law sigmoid (EAGLE/FLAMINGO
+   *                       style). Reads Z_0, n_0, n_n, n_Z and the use_birth_*
+   *                       switches.
+   *   "ColibrePressure" : COLIBRE pressure-based logistic (Chaikin et al. 2026,
+   *                       eq. 2), using the star's BIRTH pressure. Reads
+   *                       P_pivot and sigma_P, and forces use_birth_density = 1. */
   fp->f_E_min =
       parser_get_param_double(params, "EAGLEFeedback:SNII_energy_fraction_min");
   fp->f_E_max =
       parser_get_param_double(params, "EAGLEFeedback:SNII_energy_fraction_max");
-  fp->Z_0 =
-      parser_get_param_double(params, "EAGLEFeedback:SNII_energy_fraction_Z_0");
-  fp->n_0_cgs = parser_get_param_double(
-      params, "EAGLEFeedback:SNII_energy_fraction_n_0_H_p_cm3");
-  fp->n_n =
-      parser_get_param_double(params, "EAGLEFeedback:SNII_energy_fraction_n_n");
-  fp->n_Z =
-      parser_get_param_double(params, "EAGLEFeedback:SNII_energy_fraction_n_Z");
-
-  /* Check that it makes sense. */
-  if (fp->f_E_max < fp->f_E_min) {
+  if (fp->f_E_max < fp->f_E_min)
     error("Can't have the maximal energy fraction smaller than the minimal!");
+
+  char fE_model[PARSER_MAX_LINE_SIZE];
+  parser_get_opt_param_string(
+      params, "EAGLEFeedback:SNII_energy_fraction_model", fE_model, "PowerLaw");
+
+  if (strcmp(fE_model, "PowerLaw") == 0) {
+
+    fp->energy_fraction_model = 0;
+
+    fp->Z_0 = parser_get_param_double(
+        params, "EAGLEFeedback:SNII_energy_fraction_Z_0");
+    fp->n_0_cgs = parser_get_param_double(
+        params, "EAGLEFeedback:SNII_energy_fraction_n_0_H_p_cm3");
+    fp->n_n = parser_get_param_double(
+        params, "EAGLEFeedback:SNII_energy_fraction_n_n");
+    fp->n_Z = parser_get_param_double(
+        params, "EAGLEFeedback:SNII_energy_fraction_n_Z");
+
+    /* Birth vs feedback-time properties (read from the parameter file). */
+    fp->use_birth_density_for_f_th = parser_get_param_int(
+        params, "EAGLEFeedback:SNII_energy_fraction_use_birth_density");
+    fp->use_birth_Z_for_f_th = parser_get_param_int(
+        params, "EAGLEFeedback:SNII_energy_fraction_use_birth_metallicity");
+
+  } else if (strcmp(fE_model, "ColibrePressure") == 0) {
+
+    fp->energy_fraction_model = 1;
+
+    /* Pivot of the birth pressure P/k_B (in K cm^-3) and the logistic transition
+     * width sigma_P (dex of log10 P). */
+    fp->f_E_P_pivot_cgs = parser_get_param_float(
+        params, "EAGLEFeedback:SNII_energy_fraction_P_pivot_K_p_cm3");
+    fp->f_E_sigma_P = parser_get_param_float(
+        params, "EAGLEFeedback:SNII_energy_fraction_sigma_P");
+    if (fp->f_E_P_pivot_cgs <= 0.f || fp->f_E_sigma_P <= 0.f)
+      error(
+          "COLIBRE f_E needs positive SNII_energy_fraction_P_pivot_K_p_cm3 and "
+          "SNII_energy_fraction_sigma_P");
+
+    /* COLIBRE's f_E depends on the stellar BIRTH pressure, so it always uses
+     * birth properties. Force use_birth_density_for_f_th = 1, overriding the
+     * parameter-file value (if given). The metallicity switch is unused here
+     * (this f_E has no metallicity term). */
+    const int ubd = parser_get_opt_param_int(
+        params, "EAGLEFeedback:SNII_energy_fraction_use_birth_density", 1);
+    if (ubd != 1)
+      message(
+          "SNII_energy_fraction_model=ColibrePressure: forcing "
+          "use_birth_density_for_f_th=1 (overriding parameter-file value %d)",
+          ubd);
+    fp->use_birth_density_for_f_th = 1;
+    fp->use_birth_Z_for_f_th = 0;
+
+    /* Power-law parameters are unused in this model; set harmless defaults. */
+    fp->Z_0 = 1.;
+    fp->n_0_cgs = 1.;
+    fp->n_n = 0.;
+    fp->n_Z = 0.;
+
+  } else {
+    error(
+        "Unknown EAGLEFeedback:SNII_energy_fraction_model '%s' "
+        "(allowed: PowerLaw, ColibrePressure)",
+        fE_model);
   }
 
-  /* Are we using the stars' birth properties or at feedback time? */
-  fp->use_birth_density_for_f_th = parser_get_param_int(
-      params, "EAGLEFeedback:SNII_energy_fraction_use_birth_density");
-  fp->use_birth_Z_for_f_th = parser_get_param_int(
-      params, "EAGLEFeedback:SNII_energy_fraction_use_birth_metallicity");
+  /* Temperature -> cgs (K) conversion, for the COLIBRE birth pressure. */
+  fp->T_to_cgs = units_cgs_conversion_factor(us, UNIT_CONV_TEMPERATURE);
+  /* X_H * mu_ionised: converts n_H -> n_total so the COLIBRE birth pressure is
+   * P/k_B = n_H T / (X_H mu) = rho T / (mu m_H). mu = mu_ionised, consistent
+   * with temp_to_u_factor. */
+  fp->f_E_mu_XH =
+      hydro_props->hydrogen_mass_fraction * hydro_props->mu_ionised;
 
   /* Properties of the SNII enrichment model -------------------------------- */
 
