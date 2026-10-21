@@ -121,7 +121,10 @@ double eagle_feedback_temperature_change(const struct feedback_props *props,
     double delta_T = props->delta_T_pivot *
                      pow(max(ngb_nH_cgs, 0.) / props->delta_T_nH_pivot_cgs,
                          2. / 3.);
-    delta_T = min(max(delta_T, props->delta_T_min), props->delta_T_max);
+    /* Clip to [min, max]. Split into two statements: nesting min(max(...))
+     * expands both macros' internal `_a` and trips -Werror=shadow. */
+    delta_T = max(delta_T, props->delta_T_min);
+    delta_T = min(delta_T, props->delta_T_max);
     return delta_T;
   }
 
