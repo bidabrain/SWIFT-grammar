@@ -50,7 +50,22 @@ EAGLEFeedback:
   # ----------------------------- DUAL-CHANNEL --------------------------------
   SNII_f_kinetic:                       0.1             # NEW: kinetic energy fraction (0=pure thermal, 1=pure kinetic). Start point only -- recalibrate.
   SNII_delta_v_km_p_s:                  561.807095573   # Kinetic kick velocity [km/s]. ALWAYS required.
-  SNII_delta_T_K:                       3.16228e7       # Thermal channel heating dT [K] (~10^7.5). REQUIRED when SNII_f_kinetic < 1.
+
+  # Thermal-channel heating dT. Two models via SNII_delta_T_model (optional,
+  # default "Constant"):
+  #   Constant       : single dT = SNII_delta_T_K (EAGLE REF). REQUIRED when f_kin<1.
+  #   ColibreDensity : density-dependent dT (Chaikin+2026 eq. 8),
+  #                    dT = dT_pivot * (n_H,SN / n_H,pivot)^(2/3), clipped to
+  #                    [min,max]. n_H,SN is the FEEDBACK-time gas density. The
+  #                    only free knob is n_H,pivot (dT_pivot is degenerate with
+  #                    it and fixed, COLIBRE m7: 10^6.5 K, clip 10^6.5..10^7.5).
+  SNII_delta_T_model:                   Constant        # or: ColibreDensity
+  SNII_delta_T_K:                       3.16228e7       # Constant model: heating dT [K] (~10^7.5). REQUIRED when SNII_f_kinetic < 1.
+  # --- ColibreDensity model params (read only when model = ColibreDensity) ---
+  # SNII_delta_T_pivot_nH_p_cm3:        1.0             # n_H,pivot [cm^-3] (FREE calibration knob; REQUIRED in this mode)
+  # SNII_delta_T_pivot_K:               3.16228e6       # dT_pivot [K] (optional, default 10^6.5; degenerate with n_H,pivot)
+  # SNII_delta_T_min_K:                 3.16228e6       # clip lower bound [K] (optional, default 10^6.5)
+  # SNII_delta_T_max_K:                 3.16228e7       # clip upper bound [K] (optional, default 10^7.5)
   # ---------------------------------------------------------------------------
 
   # ----------------------- global switches / enrichment ----------------------

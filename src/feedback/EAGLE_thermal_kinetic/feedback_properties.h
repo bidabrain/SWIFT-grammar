@@ -251,8 +251,28 @@ struct feedback_props {
   /*! Dual-channel: desired heating temperature change delta_T (internal units)
    * for the THERMAL channel (stochastic large-delta_T heating, a la Dalla
    * Vecchia & Schaye 2012 / EAGLE_thermal). Only used when f_kin < 1.
-   * (Note: temp_to_u_factor is already defined above and reused here.) */
+   * (Note: temp_to_u_factor is already defined above and reused here.)
+   * In the Constant delta_T model this is the single heating temperature; it is
+   * unused in the ColibreDensity model. */
   float SNe_deltaT_desired;
+
+  /*! Thermal-channel delta_T model: 0 = Constant (SNII_delta_T_K, EAGLE REF);
+   * 1 = ColibreDensity (density-dependent, Chaikin et al. 2026 eq. 8). */
+  int delta_T_model;
+
+  /*! ColibreDensity delta_T: pivot heating temperature delta_T_pivot (internal
+   * units). Only used when delta_T_model == 1. */
+  float delta_T_pivot;
+
+  /*! ColibreDensity delta_T: lower clip delta_T_min (internal units). */
+  float delta_T_min;
+
+  /*! ColibreDensity delta_T: upper clip delta_T_max (internal units). */
+  float delta_T_max;
+
+  /*! ColibreDensity delta_T: pivot hydrogen number density n_H,pivot (physical
+   * cgs), the free calibration parameter of eq. 8. */
+  double delta_T_nH_pivot_cgs;
 
   /*! Energy released by one supernova type II in cgs units */
   double E_SNII_cgs;

@@ -56,10 +56,35 @@ No change to the runtime command; `--flamingo` and `--eagle` are interchangeable
 |---|---|---|
 | `SNII_f_kinetic` | optional, default **1.0** | Fraction of coupled SN energy injected **kinetically** (rest thermal). 1 = pure kinetic (= FLAMINGO); 0 = pure thermal (= EAGLE-thermal); 0<f<1 = dual channel. |
 | `SNII_delta_v_km_p_s` | **always** | Kinetic kick velocity [km/s] (COLIBRE 50; FLAMINGO 562). |
-| `SNII_delta_T_K` | **if f_kinetic < 1** | Thermal-channel heating ΔT [K] (~10^7.5 = 3.16e7). |
+| `SNII_delta_T_model` | optional, default **Constant** | Thermal-channel ΔT model: `Constant` or `ColibreDensity` (see 3.1b). |
+| `SNII_delta_T_K` | **if f_kinetic < 1** (Constant model) | Thermal-channel heating ΔT [K] (~10^7.5 = 3.16e7). |
 
 f_kin only splits the **already-coupled** energy f_E·N·E_SN; it does not change
 the total. kinetic gets `f_kin·f_E`, thermal gets `(1−f_kin)·f_E`.
+
+### 3.1b Thermal ΔT model — `SNII_delta_T_model`
+
+Optional, default `Constant` (= existing behaviour; omit to keep old configs).
+
+**`Constant`** — single heating temperature `ΔT = SNII_delta_T_K` (EAGLE REF).
+
+**`ColibreDensity`** — density-dependent ΔT (Chaikin+2026 eq. 8):
+`ΔT(n_H,SN) = ΔT_pivot · (n_H,SN / n_H,pivot)^(2/3)`, clipped to `[ΔT_min, ΔT_max]`.
+`n_H,SN` is the **feedback-time** (not birth) SPH-smoothed gas density around the
+star — independent of the f_E `use_birth_density` switch. The 2/3 slope is the
+Dalla Vecchia & Schaye (2012) cooling argument.
+
+| parameter | required? | meaning |
+|---|---|---|
+| `SNII_delta_T_pivot_nH_p_cm3` | **yes** (ColibreDensity) | Pivot density n_H,pivot [cm⁻³] — **the free calibration knob**. |
+| `SNII_delta_T_pivot_K` | optional, default **10^6.5** | ΔT_pivot [K]. Degenerate with n_H,pivot (COLIBRE fixes it); usually leave default. |
+| `SNII_delta_T_min_K` | optional, default **10^6.5** | lower clip [K]. |
+| `SNII_delta_T_max_K` | optional, default **10^7.5** | upper clip [K]. |
+
+> Note: `ColibrePressure` f_E (birth pressure) and `ColibreDensity` ΔT
+> (feedback-time density) are **independent** — COLIBRE uses birth properties
+> for f_E but feedback-time density for ΔT. You can mix any f_E model with any
+> ΔT model.
 
 ### 3.2 f_E model — `SNII_energy_fraction_model`
 

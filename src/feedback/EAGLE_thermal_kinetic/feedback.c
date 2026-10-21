@@ -97,6 +97,39 @@ double eagle_feedback_energy_fraction(const struct spart *sp,
 }
 
 /**
+ * @brief Return the heating temperature change delta_T (in internal units) of
+ * the THERMAL SNII channel.
+ *
+ * Two models, selected by props->delta_T_model:
+ *   0 = Constant       : delta_T = SNII_delta_T_K (EAGLE REF behaviour).
+ *   1 = ColibreDensity : density-dependent delta_T (Chaikin et al. 2026, eq. 8),
+ *                        delta_T = delta_T_pivot * (n_H,SN / n_H,pivot)^(2/3),
+ *                        clipped to [delta_T_min, delta_T_max]. The 2/3 slope
+ *                        is the Dalla Vecchia & Schaye (2012) cooling argument.
+ *                        n_H,SN is the gas density at FEEDBACK time (ngb_nH_cgs),
+ *                        NOT the birth density; this is independent of the f_E
+ *                        use_birth_density switch.
+ *
+ * @param props The properties of the feedback model.
+ * @param ngb_nH_cgs Hydrogen number density of the gas surrounding the star at
+ * feedback time (physical cgs units) = COLIBRE's n_H,SN.
+ */
+double eagle_feedback_temperature_change(const struct feedback_props *props,
+                                         const double ngb_nH_cgs) {
+
+  if (props->delta_T_model == 1) {
+    double delta_T = props->delta_T_pivot *
+                     pow(max(ngb_nH_cgs, 0.) / props->delta_T_nH_pivot_cgs,
+                         2. / 3.);
+    delta_T = min(max(delta_T, props->delta_T_min), props->delta_T_max);
+    return delta_T;
+  }
+
+  /* Constant (default). */
+  return props->SNe_deltaT_desired;
+}
+
+/**
  * @brief Compute the properties of the SNII stochastic feedback energy
  * injection.
  *
@@ -224,7 +257,8 @@ INLINE static void compute_SNII_feedback(
     int number_of_therm_SN_events = 0;
     if (E_SN_thermal > 0.) {
 
-      const double delta_T = feedback_props->SNe_deltaT_desired;
+      const double delta_T =
+          eagle_feedback_temperature_change(feedback_props, ngb_nH_cgs);
       const double conv_factor = feedback_props->temp_to_u_factor;
 
       double prob_thermal =
@@ -253,9 +287,10 @@ INLINE static void compute_SNII_feedback(
 #ifdef SWIFT_DEBUG_CHECKS
     if (f_E < feedback_props->f_E_min || f_E > feedback_props->f_E_max)
       error("f_E is not in the valid range! f_E=%f sp->id=%lld", f_E, sp->id);
-    if (E_SN_thermal > 0. && feedback_props->SNe_deltaT_desired <= 0.f)
+    if (E_SN_thermal > 0. &&
+        eagle_feedback_temperature_change(feedback_props, ngb_nH_cgs) <= 0.)
       error(
-          "Thermal SN channel active (f_kin < 1) but SNII_delta_T_K <= 0 "
+          "Thermal SN channel active (f_kin < 1) but the heating delta_T <= 0 "
           "(sp->id=%lld)",
           sp->id);
 #endif
@@ -516,18 +551,79 @@ void feedback_props_init(struct feedback_props *fp,
           fp->SNII_f_kin);
 
   /* Dual-channel: heating temperature change delta_T for the THERMAL channel.
-   * Required only if the thermal channel is actually used (f_kin < 1); read it
-   * optionally (default 0) otherwise so pure-kinetic (FLAMINGO) configs that do
-   * not specify SNII_delta_T_K still work. */
-  if (fp->SNII_f_kin < 1.f) {
+   *
+   * Selected by SNII_delta_T_model (optional, default "Constant"):
+   *   "Constant"       : a single delta_T = SNII_delta_T_K (EAGLE REF).
+   *   "ColibreDensity" : density-dependent delta_T (Chaikin et al. 2026 eq. 8),
+   *                      delta_T = delta_T_pivot * (n_H,SN / n_H,pivot)^(2/3),
+   *                      clipped to [min, max]. n_H,SN is the FEEDBACK-time gas
+   *                      density (independent of the f_E use_birth switch). */
+  const double T_to_internal =
+      1. / units_cgs_conversion_factor(us, UNIT_CONV_TEMPERATURE);
+
+  char dT_model[PARSER_MAX_LINE_SIZE];
+  parser_get_opt_param_string(params, "EAGLEFeedback:SNII_delta_T_model",
+                              dT_model, "Constant");
+
+  if (strcmp(dT_model, "Constant") == 0) {
+
+    fp->delta_T_model = 0;
+
+    /* Required only if the thermal channel is actually used (f_kin < 1); read
+     * it optionally (default 0) otherwise so pure-kinetic (FLAMINGO) configs
+     * that do not specify SNII_delta_T_K still work. */
+    if (fp->SNII_f_kin < 1.f)
+      fp->SNe_deltaT_desired =
+          parser_get_param_float(params, "EAGLEFeedback:SNII_delta_T_K");
+    else
+      fp->SNe_deltaT_desired = parser_get_opt_param_float(
+          params, "EAGLEFeedback:SNII_delta_T_K", 0.f);
+    fp->SNe_deltaT_desired *= T_to_internal;
+
+    /* Unused in the Constant model. */
+    fp->delta_T_pivot = 0.f;
+    fp->delta_T_min = 0.f;
+    fp->delta_T_max = 0.f;
+    fp->delta_T_nH_pivot_cgs = 0.;
+
+  } else if (strcmp(dT_model, "ColibreDensity") == 0) {
+
+    fp->delta_T_model = 1;
+
+    /* SNII_delta_T_K is unused here; keep it optional for compatibility. */
     fp->SNe_deltaT_desired =
-        parser_get_param_float(params, "EAGLEFeedback:SNII_delta_T_K");
+        parser_get_opt_param_float(params, "EAGLEFeedback:SNII_delta_T_K",
+                                   0.f) *
+        T_to_internal;
+
+    /* delta_T_pivot is degenerate with n_H,pivot; COLIBRE fixes it to 10^6.5 K
+     * (m7). Optional (default 10^6.5 K), with clip [min, max] (default
+     * 10^6.5 .. 10^7.5 K). n_H,pivot (physical cgs) is the free knob; required. */
+    const float dT_pivot_K = parser_get_opt_param_float(
+        params, "EAGLEFeedback:SNII_delta_T_pivot_K", 3.16227766e6f);
+    const float dT_min_K = parser_get_opt_param_float(
+        params, "EAGLEFeedback:SNII_delta_T_min_K", 3.16227766e6f);
+    const float dT_max_K = parser_get_opt_param_float(
+        params, "EAGLEFeedback:SNII_delta_T_max_K", 3.16227766e7f);
+    fp->delta_T_nH_pivot_cgs = parser_get_param_double(
+        params, "EAGLEFeedback:SNII_delta_T_pivot_nH_p_cm3");
+
+    if (dT_pivot_K <= 0.f || dT_min_K <= 0.f || dT_max_K <= 0.f ||
+        dT_min_K > dT_max_K || fp->delta_T_nH_pivot_cgs <= 0.)
+      error(
+          "ColibreDensity delta_T needs positive pivot/min/max temperatures "
+          "(min <= max) and a positive SNII_delta_T_pivot_nH_p_cm3");
+
+    fp->delta_T_pivot = dT_pivot_K * T_to_internal;
+    fp->delta_T_min = dT_min_K * T_to_internal;
+    fp->delta_T_max = dT_max_K * T_to_internal;
+
   } else {
-    fp->SNe_deltaT_desired = parser_get_opt_param_float(
-        params, "EAGLEFeedback:SNII_delta_T_K", 0.f);
+    error(
+        "Unknown EAGLEFeedback:SNII_delta_T_model '%s' (allowed: Constant, "
+        "ColibreDensity)",
+        dT_model);
   }
-  fp->SNe_deltaT_desired /=
-      units_cgs_conversion_factor(us, UNIT_CONV_TEMPERATURE);
 
   /* Stellar mass limits for SNII feedback */
   const double SNII_min_mass_msun =

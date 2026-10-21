@@ -31,7 +31,9 @@ masses. They are **co-calibrated** — do not tune one in isolation.
 |---|---|---|
 | **`SNII_f_kinetic`** (f_kin) | Fraction of coupled SN energy injected **kinetically** (rest is thermal). 1 = pure kinetic (FLAMINGO), 0 = pure thermal (EAGLE). **Primary knob.** | COLIBRE ≈ 0.3 (cold-ISM; recalibrate for eEOS) |
 | **`SNII_delta_v_km_p_s`** (Δv) | Target **kick velocity** of the kinetic channel → sets wind/turbulence strength. | COLIBRE 50; FLAMINGO 562 (very different roles!) |
-| **`SNII_delta_T_K`** (ΔT) | **Heating temperature** of the thermal channel → higher = less overcooling but hotter winds. Required when f_kin < 1. | 10^7.5 ≈ 3.16e7 K |
+| **`SNII_delta_T_K`** (ΔT) | **Heating temperature** of the thermal channel → higher = less overcooling but hotter winds. Required when f_kin < 1 (Constant model). | 10^7.5 ≈ 3.16e7 K |
+| `SNII_delta_T_model` | `Constant` (fixed ΔT) or `ColibreDensity` (ΔT ∝ n_H,SN^2/3, Chaikin+2026 eq. 8). | Constant (default) |
+| **`SNII_delta_T_pivot_nH_p_cm3`** (n_H,pivot) | ColibreDensity ΔT: **pivot density** — the free knob (ΔT_pivot fixed to 10^6.5 K). Sets at which density ΔT starts climbing toward the 10^7.5 K cap. | ~1 cm⁻³ (COLIBRE median SN density) |
 
 ### A2. Total coupled energy fraction f_E (shared by both channels, split by f_kin)
 
