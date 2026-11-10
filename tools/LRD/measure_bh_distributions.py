@@ -7,13 +7,12 @@ This is the "step C" diagnostic for the LRD confined-feedback project: before
 committing compute time to gated runs, we want to know, in a *baseline* run
 (no gating), the range of
 
-  * the raw, unsuppressed Bondi-based Eddington ratio  (mdot / mdot_Edd), and
-  * a proxy nuclear column density  N_H,
+  * the raw, unsuppressed Bondi-based Eddington ratio  (mdot / mdot_Edd),
+  * the *volume* hydrogen number density n_H at the BH (cm^-3) -- this is the
+    quantity the Booth & Schaye boost threshold n_H* acts on, and
+  * a proxy nuclear column density  N_H (cm^-2),
 
-as a function of redshift and black-hole mass, and how tightly the two
-correlate. If they correlate tightly, a single accretion-rate criterion (the
-scheme actually implemented) is sufficient and the column-density criterion is
-redundant -- exactly the check D. Schleicher suggested doing in post-processing.
+as a function of redshift and black-hole mass, and how tightly they correlate.
 
 IMPORTANT about the Eddington ratio
 -----------------------------------
@@ -22,23 +21,15 @@ value (clipped at ``max_eddington_fraction``). To see the super-Eddington tail
 that sets the LRD threshold you must use either:
 
   * the ``UnsuppressedEddingtonFractions`` field (added for this project), or
-  * a baseline run with ``max_eddington_fraction`` set very large so the cap
-    never binds.
+  * a baseline run with ``max_eddington_fraction`` set very large.
 
-The script prefers ``UnsuppressedEddingtonFractions`` when present and warns
-if it has to fall back to ``EddingtonFractions``.
-
-Column-density proxy
---------------------
-We cannot resolve the sub-pc envelope, so we build the same kind of kernel-scale
-proxy the Bondi model uses:
-
-    N_H = X_H * rho_gas_phys / m_p * L
-
-with L the line-of-sight length scale. By default L = kernel_gamma * h (the
-kernel support radius); ``--column-length`` lets you switch to h or a fixed
-physical length. This is a *proxy threshold*, not a face-value column -- the
-same caveat as the accretion boost factor.
+Density / column proxy
+----------------------
+Volume density:  n_H = X_H * rho_gas_phys / m_p                    [cm^-3]
+Column proxy:    N_H = X_H * rho_gas_phys / m_p * L                [cm^-2]
+with L the line-of-sight length (default kernel_gamma*h). n_H is directly
+comparable to the boost threshold n_H* (default 0.1 cm^-3); N_H is a
+kernel-scale proxy, not a face-value column.
 
 Usage
 -----
@@ -62,37 +53,56 @@ except ImportError:
 # Proton mass in cgs.
 M_PROTON_CGS = 1.67262192369e-24
 # Kernel-support / smoothing-length ratio for Wendland-C2 in 3D (kernel_gamma).
-# Used as the default line-of-sight length in units of the smoothing length.
 KERNEL_GAMMA_WENDLAND_C2_3D = 1.936492
 
-# Candidate accretion-rate thresholds (in units of the Eddington rate) at which
-# we report the flagged fraction -- these bracket plausible f_LRD choices.
+# Candidate accretion-rate thresholds (Eddington units).
 EDD_THRESHOLDS = [1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0]
 # Candidate column thresholds (cm^-2); 1.5e24 is the Compton-thick boundary.
 NH_THRESHOLDS = [1e22, 1e23, 1.5e24, 1e25]
+# Candidate *volume* density thresholds (cm^-3) bracketing plausible n_H* values.
+NHSTAR_CANDIDATES = [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
 
 
 def _read_physical_cgs(dset, scale_factor):
-    """Return a dataset converted to physical CGS.
+    """Dataset -> physical CGS, using SWIFT's per-dataset attributes.
 
-    Uses the SWIFT per-dataset attributes when available:
-      * "Conversion factor to CGS (not including cosmological corrections)"
-      * "a-scale exponent of the field"
-    Falls back to the raw values (with a warning) if the attributes are absent.
+    Tries, in order:
+      1. the direct physical-CGS factor (already includes cosmological terms);
+      2. a comoving-CGS factor times a**(a-scale exponent), accepting the
+         attribute-name variants used by different SWIFT versions.
+    Raises if neither is found -- code units would poison everything downstream.
     """
     raw = dset[:]
     attrs = dset.attrs
-    cgs_key = "Conversion factor to CGS (not including cosmological corrections)"
-    a_key = "a-scale exponent of the field"
-    if cgs_key in attrs and a_key in attrs:
-        cgs = np.atleast_1d(attrs[cgs_key])[0]
-        a_exp = np.atleast_1d(attrs[a_key])[0]
-        return raw * cgs * (scale_factor ** a_exp)
-    sys.stderr.write(
-        f"  [warn] {dset.name}: missing CGS/a-scale attributes; "
-        "values left in code units.\n"
+
+    key_phys = (
+        "Conversion factor to physical CGS (including cosmological corrections)"
     )
-    return raw
+    if key_phys in attrs:
+        return raw * float(np.atleast_1d(attrs[key_phys])[0])
+
+    cgs_keys = [
+        "Conversion factor to CGS (not including cosmological corrections)",
+        "Conversion factor to CGS (including cosmological corrections)",
+    ]
+    a_keys = ["a-scale exponent", "a-scale exponent of the field"]
+    cgs = next(
+        (float(np.atleast_1d(attrs[k])[0]) for k in cgs_keys if k in attrs),
+        None,
+    )
+    a_exp = next(
+        (float(np.atleast_1d(attrs[k])[0]) for k in a_keys if k in attrs),
+        None,
+    )
+    if cgs is not None and a_exp is not None:
+        return raw * cgs * (scale_factor ** a_exp)
+
+    sys.stderr.write(
+        f"  [ERROR] {dset.name}: no usable unit attributes found.\n"
+        f"          attributes present: {sorted(map(str, attrs.keys()))}\n"
+        "          Values would stay in CODE units -- aborting this field.\n"
+    )
+    raise KeyError(f"unit attributes missing on {dset.name}")
 
 
 def _get(group, *names):
@@ -104,11 +114,7 @@ def _get(group, *names):
 
 
 def load_snapshot(path, column_length, hydrogen_fraction):
-    """Load the per-BH quantities of interest from one snapshot.
-
-    Returns a dict of physical-CGS numpy arrays (plus scale factor / redshift),
-    or None if the snapshot has no black holes.
-    """
+    """Load the per-BH quantities of interest from one snapshot."""
     with h5py.File(path, "r") as f:
         header = f["Header"].attrs
         a = float(np.atleast_1d(header.get("Scale-factor", 1.0))[0])
@@ -119,7 +125,6 @@ def load_snapshot(path, column_length, hydrogen_fraction):
             return None
         bh = f["PartType5"]
 
-        # Solar mass in grams, for reporting masses in Msun.
         msun_cgs = 1.98841e33
 
         m_sub_dset = _get(bh, "SubgridMasses", "DynamicalMasses", "Masses")
@@ -133,17 +138,22 @@ def load_snapshot(path, column_length, hydrogen_fraction):
 
         rho_dset = _get(bh, "GasDensities")
         h_dset = _get(bh, "SmoothingLengths")
-        n_h = None
-        if rho_dset is not None and h_dset is not None:
-            rho_cgs = _read_physical_cgs(rho_dset, a)  # g cm^-3
-            h_cgs = _read_physical_cgs(h_dset, a)  # cm
-            if column_length == "support":
-                length = KERNEL_GAMMA_WENDLAND_C2_3D * h_cgs
-            elif column_length == "h":
-                length = h_cgs
-            else:  # a fixed physical length in kpc
-                length = np.full_like(h_cgs, float(column_length) * 3.0857e21)
-            n_h = hydrogen_fraction * rho_cgs / M_PROTON_CGS * length
+        n_h_vol = None  # volume number density [cm^-3]
+        n_h = None       # column proxy [cm^-2]
+        if rho_dset is not None:
+            rho_cgs = _read_physical_cgs(rho_dset, a)  # g cm^-3 physical
+            n_h_vol = hydrogen_fraction * rho_cgs / M_PROTON_CGS
+            if h_dset is not None:
+                h_cgs = _read_physical_cgs(h_dset, a)  # cm
+                if column_length == "support":
+                    length = KERNEL_GAMMA_WENDLAND_C2_3D * h_cgs
+                elif column_length == "h":
+                    length = h_cgs
+                else:  # fixed physical length in kpc
+                    length = np.full_like(
+                        h_cgs, float(column_length) * 3.0857e21
+                    )
+                n_h = n_h_vol * length
 
         flags_dset = _get(bh, "LRDConfinedFlags")
         flags = flags_dset[:].astype(bool) if flags_dset is not None else None
@@ -165,6 +175,7 @@ def load_snapshot(path, column_length, hydrogen_fraction):
         "m_sub_Msun": m_sub,
         "edd": edd,
         "used_unsuppressed": used_unsuppressed,
+        "n_h_vol": n_h_vol,
         "n_h": n_h,
         "flags": flags,
         "conf_mass_Msun": conf_mass,
@@ -205,9 +216,7 @@ def report_snapshot(d):
         if not d["used_unsuppressed"]:
             print(
                 "  [warn] Only post-cap EddingtonFractions available; the "
-                "super-Eddington tail is clipped.\n"
-                "         Re-run baseline with a large max_eddington_fraction, "
-                "or output UnsuppressedEddingtonFractions."
+                "super-Eddington tail is clipped."
             )
         edd = np.asarray(d["edd"], dtype=float)
         edd = edd[np.isfinite(edd)]
@@ -216,6 +225,25 @@ def report_snapshot(d):
             for t in EDD_THRESHOLDS:
                 frac = np.mean(edd > t)
                 print(f"      f(>{t:>6g} x Edd) = {frac:.4g}  ({int(np.sum(edd > t))} BHs)")
+
+    # Volume number density -- the quantity the boost threshold n_H* acts on.
+    if d["n_h_vol"] is not None:
+        print(_fmt_pct("volume n_H [cm^-3]", _pct(d["n_h_vol"]), fmt="{:.3e}"))
+        nhv = np.asarray(d["n_h_vol"], dtype=float)
+        nhv = nhv[np.isfinite(nhv)]
+        if nhv.size:
+            if np.median(nhv) > 1e6:
+                print(
+                    "  [ERROR] median volume n_H > 1e6 cm^-3: impossible at "
+                    "kernel scale -> unit conversion still wrong for this file."
+                )
+            print("  fraction above candidate boost thresholds n_H*:")
+            for t in NHSTAR_CANDIDATES:
+                frac = np.mean(nhv > t)
+                print(
+                    f"      f(n_H > {t:>5g} cm^-3) = {frac:.4g}  "
+                    f"({int(np.sum(nhv > t))} BHs)  <- would be boosted if n_H*={t}"
+                )
 
     if d["n_h"] is not None:
         print(_fmt_pct("proxy column N_H [cm^-2]", _pct(d["n_h"]), fmt="{:.3e}"))
@@ -249,7 +277,7 @@ def report_snapshot(d):
             frac = np.where(tot > 0, conf / tot, 0.0)
         print(
             f"  confined-grown mass fraction: median={np.median(frac):.3g} "
-            f"max={np.max(frac):.3g}  (mass grown while feedback confined)"
+            f"max={np.max(frac):.3g}"
         )
 
 
@@ -263,7 +291,7 @@ def _spearman(x, y):
     return float((rx * ry).sum() / denom) if denom > 0 else float("nan")
 
 
-def make_plots(snapshots, outdir):
+def make_plots(snapshots, outdir, n_h_star):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -280,23 +308,70 @@ def make_plots(snapshots, outdir):
         edd = edd[np.isfinite(edd) & (edd > 0)]
         if edd.size == 0:
             continue
-        ax.hist(
-            np.log10(edd),
-            bins=40,
-            histtype="step",
-            density=True,
-            label=f"z={d['z']:.2f}",
-        )
+        ax.hist(np.log10(edd), bins=40, histtype="step", density=True,
+                label=f"z={d['z']:.2f}")
     ax.set_xlabel(r"$\log_{10}(\dot m / \dot m_{\rm Edd})$ (unsuppressed)")
     ax.set_ylabel("PDF")
-    ax.axvline(np.log10(100.0), ls="--", c="k", lw=1, label="100 x Edd")
-    ax.legend(fontsize=8)
+    ax.axvline(0.0, ls="--", c="k", lw=1, label="Eddington")
+    ax.legend(fontsize=7, ncol=2)
     fig.tight_layout()
     p = os.path.join(outdir, "eddington_ratio_pdf.png")
     fig.savefig(p, dpi=130)
+    plt.close(fig)
     print(f"  wrote {p}")
 
-    # 2) Eddington ratio vs proxy column (last snapshot with both).
+    # 2) Volume n_H distribution per snapshot, with the boost threshold marked.
+    fig, ax = plt.subplots(figsize=(7, 5))
+    plotted = False
+    for d in snapshots:
+        if d["n_h_vol"] is None:
+            continue
+        nhv = np.asarray(d["n_h_vol"], dtype=float)
+        nhv = nhv[np.isfinite(nhv) & (nhv > 0)]
+        if nhv.size == 0:
+            continue
+        ax.hist(np.log10(nhv), bins=40, histtype="step", density=True,
+                label=f"z={d['z']:.2f}")
+        plotted = True
+    if plotted:
+        ax.axvline(np.log10(n_h_star), ls="--", c="k", lw=1.5,
+                   label=f"n_H* = {n_h_star:g}")
+        ax.set_xlabel(r"$\log_{10}(n_{\rm H}\,/\,{\rm cm^{-3}})$ at BH (volume)")
+        ax.set_ylabel("PDF")
+        ax.legend(fontsize=7, ncol=2)
+        fig.tight_layout()
+        p = os.path.join(outdir, "nH_volume_pdf.png")
+        fig.savefig(p, dpi=130)
+        print(f"  wrote {p}")
+    plt.close(fig)
+
+    # 3) Fraction of BHs above n_H* vs redshift.
+    zs, fracs = [], []
+    for d in snapshots:
+        if d["n_h_vol"] is None:
+            continue
+        nhv = np.asarray(d["n_h_vol"], dtype=float)
+        nhv = nhv[np.isfinite(nhv)]
+        if nhv.size == 0:
+            continue
+        zs.append(d["z"])
+        fracs.append(np.mean(nhv > n_h_star))
+    if zs:
+        order = np.argsort(zs)
+        zs = np.array(zs)[order]
+        fracs = np.array(fracs)[order]
+        fig, ax = plt.subplots(figsize=(7, 5))
+        ax.plot(zs, fracs, "o-")
+        ax.set_xlabel("z")
+        ax.set_ylabel(fr"fraction of BHs with $n_{{\rm H}} > {n_h_star:g}$ cm$^{{-3}}$")
+        ax.invert_xaxis()
+        fig.tight_layout()
+        p = os.path.join(outdir, "frac_above_nHstar_vs_z.png")
+        fig.savefig(p, dpi=130)
+        plt.close(fig)
+        print(f"  wrote {p}")
+
+    # 4) Eddington ratio vs proxy column (last snapshot with both).
     for d in reversed(snapshots):
         if d["edd"] is None or d["n_h"] is None:
             continue
@@ -308,7 +383,7 @@ def make_plots(snapshots, outdir):
         fig, ax = plt.subplots(figsize=(6.5, 5.5))
         ax.scatter(np.log10(edd[good]), np.log10(nh[good]), s=8, alpha=0.5)
         ax.axhline(np.log10(1.5e24), ls="--", c="r", lw=1, label="Compton-thick")
-        ax.axvline(np.log10(100.0), ls="--", c="k", lw=1, label="100 x Edd")
+        ax.axvline(0.0, ls="--", c="k", lw=1, label="Eddington")
         ax.set_xlabel(r"$\log_{10}(\dot m / \dot m_{\rm Edd})$")
         ax.set_ylabel(r"$\log_{10}(N_{\rm H}\,/\,{\rm cm^{-2}})$")
         ax.set_title(f"z={d['z']:.2f}")
@@ -316,25 +391,30 @@ def make_plots(snapshots, outdir):
         fig.tight_layout()
         p = os.path.join(outdir, "edd_vs_column.png")
         fig.savefig(p, dpi=130)
+        plt.close(fig)
         print(f"  wrote {p}")
         break
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ap.add_argument("snapshots", nargs="+", help="SWIFT snapshot HDF5 file(s).")
     ap.add_argument(
-        "--column-length",
-        default="support",
-        help="Line-of-sight length for the N_H proxy: 'support' "
-        "(kernel_gamma*h, default), 'h', or a fixed physical length in kpc.",
+        "--column-length", default="support",
+        help="LOS length for N_H proxy: 'support' (kernel_gamma*h), 'h', "
+        "or a fixed physical length in kpc.",
     )
     ap.add_argument(
-        "--hydrogen-fraction",
-        type=float,
-        default=0.752,
-        help="Hydrogen mass fraction X_H for the N_H proxy (default 0.752).",
+        "--hydrogen-fraction", type=float, default=0.752,
+        help="Hydrogen mass fraction X_H (default 0.752).",
+    )
+    ap.add_argument(
+        "--n-h-star", type=float, default=0.1,
+        help="Boost threshold density n_H* [cm^-3] to mark in plots "
+        "(default 0.1, B&S09).",
     )
     ap.add_argument("--plot", action="store_true", help="Write summary PNG plots.")
     ap.add_argument("--outdir", default="lrd_figs", help="Output dir for --plot.")
@@ -357,13 +437,15 @@ def main(argv=None):
         sys.exit("No snapshots with black holes were read.")
 
     if args.plot:
-        make_plots(snapshots, args.outdir)
+        make_plots(snapshots, args.outdir, args.n_h_star)
 
     print(
-        "\nGuidance: pick f_LRD from the high tail of the unsuppressed "
-        "Eddington ratio (e.g. the p99 / the knee of the PDF), then check the "
-        "Spearman rho above -- if |rho| is high, the accretion-rate criterion "
-        "alone reproduces the column-density selection."
+        "\nGuidance on n_H*: read 'fraction above candidate boost thresholds' "
+        "above. If f(n_H > 0.1) is tiny at z=4-8, the boost almost never fires "
+        "and the bottleneck is n_H*, not beta -- lower n_H* until a meaningful "
+        "(~10-30%) dense subset sits above it, OR recalibrate the accretion "
+        "normalisation instead. Caveat: lowering n_H* below the EOS/SF density "
+        "means boosting gas the resolution has already smoothed -- state it."
     )
 
 
