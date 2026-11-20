@@ -38,6 +38,69 @@
 /* Standard includes */
 #include <float.h>
 #include <math.h>
+#include <stdint.h>
+#include <string.h>
+
+/**
+ * @brief NaN/inf test on the IEEE-754 bit pattern.
+ *
+ * SWIFT is built with -ffast-math (=> -ffinite-math-only), under which the
+ * compiler folds isfinite()/isnan() to constants. Inspecting the exponent
+ * bits directly is not affected by that.
+ */
+__attribute__((always_inline)) INLINE static int bh_bits_is_finite(
+    const double x) {
+  uint64_t u;
+  memcpy(&u, &x, sizeof(u));
+  return ((u >> 52) & 0x7ffULL) != 0x7ffULL;
+}
+
+__attribute__((always_inline)) INLINE static int bh_bits_is_nan(
+    const double x) {
+  uint64_t u;
+  memcpy(&u, &x, sizeof(u));
+  return (((u >> 52) & 0x7ffULL) == 0x7ffULL) &&
+         ((u & 0xfffffffffffffULL) != 0ULL);
+}
+
+/**
+ * @brief Abort with a full dump of the BH state if a quantity is NaN or inf.
+ *
+ * Diagnostic added for the NaN subgrid_mass crash in LRD_base_boost
+ * (see tools/LRD/crash_nan_subgrid_mass.md). Does not change the bpart
+ * layout, so old restart files remain readable.
+ */
+__attribute__((always_inline)) INLINE static void black_holes_check_finite(
+    const struct bpart *bp, const double value, const char *name,
+    const int line, const double dt) {
+
+  if (bh_bits_is_finite(value)) return;
+
+  error(
+      "BH %lld: non-finite %s = %e (black_holes.h:%d)\n"
+      "  M_sub=%e M_dyn=%e mdot=%e f_Edd=%e f_Edd_raw=%e acc_eff=%e mode=%d "
+      "lrd=%d\n"
+      "  spin=%e eps_r=%e eps_j=%e eps_w=%e dt_ang_mom=%e dt=%e\n"
+      "  rho_gas=%e c_s=%e sigma_v=%e h=%e n_ngb=%d ngb_mass=%e\n"
+      "  v_gas=(%e,%e,%e) v_circ=(%e,%e,%e)\n"
+      "  L_gas=(%e,%e,%e) J_dir=(%e,%e,%e)",
+      bp->id, name, value, line, bp->subgrid_mass, bp->mass,
+      bp->accretion_rate, bp->eddington_fraction,
+      bp->eddington_fraction_unsuppressed, bp->accretion_efficiency,
+      (int)bp->accretion_mode, (int)bp->in_lrd_phase, bp->spin,
+      bp->radiative_efficiency, bp->jet_efficiency, bp->wind_efficiency,
+      bp->dt_ang_mom, dt, bp->rho_gas, bp->sound_speed_gas,
+      bp->velocity_dispersion_gas, bp->h, bp->num_ngbs, bp->ngb_mass,
+      bp->velocity_gas[0], bp->velocity_gas[1], bp->velocity_gas[2],
+      bp->circular_velocity_gas[0], bp->circular_velocity_gas[1],
+      bp->circular_velocity_gas[2], bp->spec_angular_momentum_gas[0],
+      bp->spec_angular_momentum_gas[1], bp->spec_angular_momentum_gas[2],
+      bp->angular_momentum_direction[0], bp->angular_momentum_direction[1],
+      bp->angular_momentum_direction[2]);
+}
+
+#define BH_CHECK_FINITE(bp, x, dt) \
+  black_holes_check_finite(bp, (double)(x), #x, __LINE__, dt)
 
 /**
  * @brief Computes the time-step of a given black hole particle.
@@ -89,6 +152,10 @@ __attribute__((always_inline)) INLINE static float black_holes_compute_timestep(
 
     /* See if the spin evolution time step is even smaller */
     bh_timestep = min(bh_timestep, bp->dt_ang_mom);
+
+    /* Diagnostic: inf is allowed here (e.g. zero rates), NaN is not */
+    if (bh_bits_is_nan(bh_timestep))
+      black_holes_check_finite(bp, bh_timestep, "bh_timestep", __LINE__, 0.);
 
     /* The final timestep of the BH cannot be smaller than the miminum allowed
      * time-step */
@@ -808,6 +875,10 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
 
   } /* ends section without multi-phase accretion */
 
+  /* Diagnostic: raw Bondi/Krumholz rate (a NaN here would otherwise be
+   * silently turned into the Eddington cap by min() below) */
+  BH_CHECK_FINITE(bp, accr_rate, dt);
+
   /* Compute the boost factor from Booth, Schaye (2009) */
   if (props->with_boost_factor) {
     const double gas_rho_phys = bp->rho_gas * cosmo->a3_inv;
@@ -853,6 +924,10 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
       4. * M_PI * G * BH_mass * proton_mass /
       (eps_Novikov_Thorne(bp->spin) * c * sigma_Thomson);
 
+  /* Diagnostic */
+  BH_CHECK_FINITE(bp, accr_rate, dt);
+  BH_CHECK_FINITE(bp, Eddington_rate, dt);
+
   /* Should we record this time as the most recent high accretion rate? */
   if (accr_rate > props->f_Edd_recording * Eddington_rate) {
     if (with_cosmology) {
@@ -892,6 +967,14 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
   bp->radiative_efficiency = black_hole_radiative_efficiency(bp, props);
   bp->jet_efficiency = black_hole_jet_efficiency(bp, props);
   bp->wind_efficiency = black_hole_wind_efficiency(bp, props);
+
+  /* Diagnostic */
+  BH_CHECK_FINITE(bp, bp->accretion_efficiency, dt);
+  BH_CHECK_FINITE(bp, bp->accretion_rate, dt);
+  BH_CHECK_FINITE(bp, bp->eddington_fraction, dt);
+  BH_CHECK_FINITE(bp, bp->radiative_efficiency, dt);
+  BH_CHECK_FINITE(bp, bp->jet_efficiency, dt);
+  BH_CHECK_FINITE(bp, bp->wind_efficiency, dt);
 
   /* Determine whether the BH is in the LRD ("Little Red Dot") confined-
    * feedback phase. The transition is governed purely by the raw, unsuppressed
@@ -1004,16 +1087,25 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
   bp->jet_direction[1] = bp->angular_momentum_direction[1];
   bp->jet_direction[2] = bp->angular_momentum_direction[2];
 
+  /* Diagnostic */
+  BH_CHECK_FINITE(bp, delta_m_0, dt);
+  BH_CHECK_FINITE(bp, n_i, dt);
+  BH_CHECK_FINITE(bp, bp->angular_momentum_direction[0], dt);
+  BH_CHECK_FINITE(bp, bp->angular_momentum_direction[1], dt);
+  BH_CHECK_FINITE(bp, bp->angular_momentum_direction[2], dt);
+
   float spin_final = -1.;
   /* Calculate the change in the BH spin */
   if (bp->subgrid_mass > 0.) {
-    spin_final = bp->spin + delta_m_0 / bp->subgrid_mass *
-                                black_hole_spinup_rate(bp, constants, props);
+    const float spinup_rate = black_hole_spinup_rate(bp, constants, props);
+    BH_CHECK_FINITE(bp, spinup_rate, dt);
+    spin_final = bp->spin + delta_m_0 / bp->subgrid_mass * spinup_rate;
+    BH_CHECK_FINITE(bp, spin_final, dt);
   } else {
     error(
         "Black hole with id %lld tried to evolve spin with zero "
-        "(or less) subgrid mass. ",
-        bp->id);
+        "(or less) subgrid mass (%e). ",
+        bp->id, bp->subgrid_mass);
   }
 
   /* Make sure that the spin does not shoot above 1 or below -1. Physically
@@ -1058,6 +1150,9 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
                    black_hole_jet_efficiency(bp, props) -
                    black_hole_wind_efficiency(bp, props));
 
+  /* Diagnostic */
+  BH_CHECK_FINITE(bp, delta_m_real, dt);
+
   /* Increase the reservoir. During the LRD confined-feedback phase this is
    * skipped: the feedback energy is assumed to be confined and radiated away
    * as soft photospheric emission that does not couple to the galaxy-scale
@@ -1090,6 +1185,9 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
   bp->wind_energy_by_mode[bp->accretion_mode] +=
       delta_m_0 * c * c * bp->wind_efficiency;
   bp->wind_energy += delta_m_0 * c * c * bp->wind_efficiency;
+
+  /* Diagnostic: the check below is false for NaN, so catch it first */
+  BH_CHECK_FINITE(bp, bp->subgrid_mass, dt);
 
   if (bp->subgrid_mass < 0.) {
     warning(
@@ -1410,6 +1508,11 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
   bp->accretion_rate = accr_rate * bp->accretion_efficiency;
   bp->eddington_fraction = bp->accretion_rate / Eddington_rate;
 
+  /* Diagnostic */
+  BH_CHECK_FINITE(bp, bp->accretion_efficiency, 0.);
+  BH_CHECK_FINITE(bp, bp->accretion_rate, 0.);
+  BH_CHECK_FINITE(bp, bp->eddington_fraction, 0.);
+
   /* The accretion/feedback mode is now possibly different, so the feedback
      efficiencies need to be updated. This is important for computing the
      next time-step of the BH. */
@@ -1466,6 +1569,10 @@ __attribute__((always_inline)) INLINE static void black_holes_prepare_feedback(
         dt_ang_mom = min(dt_ang_mom, dt_redirection);
       }
     }
+
+    /* Diagnostic: inf is allowed (spinup rate of zero), NaN is not */
+    if (bh_bits_is_nan(dt_ang_mom))
+      black_holes_check_finite(bp, dt_ang_mom, "dt_ang_mom", __LINE__, 0.);
 
     bp->dt_ang_mom = dt_ang_mom;
   } else {
