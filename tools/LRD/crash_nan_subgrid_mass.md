@@ -96,3 +96,30 @@ Black hole with id 31264365 tried to evolve spin with zero (or less) subgrid mas
 
 - 环境脚本 `~/gcc_ompi5`：gnu14/14.2.0、openmpi5/5.0.7、hwloc/2.12.0、libfabric/1.18.0、gsl/2.8、hdf5/1.14.6、ucx/1.18.0-mt，加上 `~/local/omp5/{fftw3,GKlib,METIS,ParMETIS}`
 - 作业脚本 `/gpfs/dbi224/LRD/LRD_base_boost/mpirun.sbatch`（1 节点、1 rank、32 线程、`--exclusive`）
+
+## 7. 诊断结果（作业 1328342，从 restart 起跑，2026-11-20）
+
+带诊断的 `swift_mpi`（工作区里 `black_holes.h` 的 `BH_CHECK_FINITE`）从 `restart/` 续跑，墙钟 697 s 后在 step 28994、a=0.07053 被拦下：
+
+```
+BH 31264365: non-finite bp->angular_momentum_direction[0] = -nan (black_holes.h:1093)
+  M_sub=1.846301e+19 M_dyn=5.017666e-02 mdot=6.639668e+25 f_Edd=100 f_Edd_raw=1.138214e+20
+  acc_eff=1 mode=2 lrd=1 spin=0.0924 eps_r=6.2e-06 eps_j=6.5e-03 eps_w=0.144 dt=6.364e-10
+```
+
+**根因不是数值 bug，而是 subgrid_mass 的指数失控增长，最后 float32 溢出：**
+
+1. M_sub = 1.85e19 内部单位 ≈ **1.8e29 Msun**（M_dyn 只有 5e8 Msun）。f_Edd 一直顶在 `max_eddington_fraction: 100`。
+2. 以 100 倍 Eddington 吸积时质量 e 折叠时间 ≈ t_Sal/(100·(1-ε)) ≈ (0.061 × 450 Myr)/85 ≈ 0.32 Myr。
+   从 1.67e-5 到 1.85e19 是 ln(1.1e24) ≈ 55 个 e 折叠 ≈ 18 Myr；
+   而 ~29000 步 × 626 yr ≈ 18 Myr。**完全吻合**：就是纯粹的 Eddington 上限指数增长。
+3. NaN 的产生点：`black_hole_angular_momentum_magnitude()`（`black_holes_spin.h:127`）用 float 算
+   `M_sub² · a · G/c`，M_sub² ≈ 3.4e38 ≥ FLT_MAX → inf；随后 `ang_mom_total / modulus` = inf/inf = NaN，
+   NaN 再扩散到 spin、subgrid_mass，最终在原版里表现为 "zero subgrid mass"。
+4. subgrid_mass 的增长不受可用气体约束（nibbling 只限制 M_dyn），所以没有任何东西阻止它。
+   LRD 阶段又没有反馈，Bondi ∝ M² 的失控无法自我调节（f_Edd_raw 达到 1e20）。
+
+结论：第 5 节里的 NaN 保护只能把崩溃变成更早/更清楚的报错，**真正需要改的是物理设定**：
+- 在 LRD 阶段（或全局）限制 f_Edd 上限（例如 max_eddington_fraction 设为 ~10 或更低），或降低 boost_alpha；
+- 和/或限制 M_sub 不超过 M_dyn（或某个与可用气体挂钩的上限）；
+- 和/或让 LRD 阶段有一个退出条件（例如持续时间或累计质量上限），而不是只看 f_Edd_raw。
